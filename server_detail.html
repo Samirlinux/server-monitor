@@ -1,0 +1,602 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl" id="htmlRoot">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Server Uptime & Logs — {{ server_name }} | Eng. Samir Abo El-Khair</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;600;700;800&family=Inter:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Cairo', 'Inter', sans-serif;
+      background-color: #ffffff;
+      color: #14532d;
+    }
+    .panel {
+      background-color: #ffffff;
+      border: 1px solid #bbf7d0;
+      box-shadow: 0 1px 3px rgba(20, 83, 45, 0.05);
+    }
+    .panel-header {
+      background-color: #f0fdf4;
+      border-bottom: 1px solid #bbf7d0;
+    }
+    .btn-green {
+      background-color: #15803d;
+      color: #ffffff;
+    }
+    .btn-green:hover {
+      background-color: #166534;
+    }
+    .btn-outline-green {
+      background-color: #ffffff;
+      color: #15803d;
+      border: 1px solid #86efac;
+    }
+    .btn-outline-green:hover {
+      background-color: #f0fdf4;
+    }
+    .log-box {
+      background-color: #f8fafc;
+      color: #14532d;
+      border: 1px solid #bbf7d0;
+      font-family: Consolas, Monaco, 'Courier New', monospace;
+    }
+  </style>
+</head>
+<body class="min-h-screen pb-16">
+
+  <!-- Top Header -->
+  <header class="bg-white border-b-2 border-green-700 sticky top-0 z-30 px-6 py-3.5">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+      <div class="flex items-center gap-4">
+        <a href="/" id="btnBackHome" class="px-3.5 py-1.5 rounded btn-outline-green text-xs font-bold transition">
+          العودة للرئيسية
+        </a>
+        <div>
+          <div class="flex items-center gap-2.5">
+            <h1 id="srvHeaderName" class="text-xl font-extrabold text-green-900">{{ server_name }}</h1>
+            <span id="srvHeaderStatus" class="px-2.5 py-0.5 rounded text-xs font-bold bg-green-50 text-green-800 border border-green-300">Checking...</span>
+            <span class="px-2 py-0.5 rounded text-xs font-bold bg-green-100 text-green-900 border border-green-300 font-mono">Version 1.0</span>
+          </div>
+          <p class="text-xs font-mono text-green-700 mt-0.5">
+            IP: {{ server_ip }} | Developed by <strong>Eng. Samir Abo El-Khair</strong>
+          </p>
+        </div>
+      </div>
+
+      <div class="flex items-center gap-2.5">
+        <span id="lastCheckedAt" class="text-xs font-semibold text-green-700"></span>
+        <button onclick="toggleLanguage()" id="btnLang" class="px-3.5 py-1.5 rounded btn-outline-green text-xs font-bold transition">
+          English
+        </button>
+        <button id="btnCheckNow" onclick="triggerImmediateCheck()" class="px-4 py-1.5 rounded btn-green text-xs font-bold transition">
+          فحص فوري الآن
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 mt-6 space-y-6">
+
+    <!-- Section 1: Dedicated Uptime & 5-Second Heartbeat Timeline -->
+    <section class="panel rounded-lg overflow-hidden">
+      <div class="panel-header px-5 py-3.5 flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h2 id="txtUptimeTitle" class="text-base font-extrabold text-green-900">مؤشر الـ Uptime وسجل الاستجابة اللحظي (كل 5 ثوانٍ)</h2>
+          <p id="uptimeSystemStr" class="text-xs text-green-700 mt-0.5 font-semibold">Uptime: Loading...</p>
+        </div>
+        <div class="flex items-center gap-6 text-center">
+          <div>
+            <div id="lblUp24" class="text-xs font-bold text-green-700">Uptime (24h)</div>
+            <div id="up24h" class="text-xl font-extrabold text-green-900">100%</div>
+          </div>
+          <div>
+            <div id="lblUp7d" class="text-xs font-bold text-green-700">Uptime (7 Days)</div>
+            <div id="up7d" class="text-xl font-extrabold text-green-900">100%</div>
+          </div>
+          <div>
+            <div id="lblPing" class="text-xs font-bold text-green-700">Ping</div>
+            <div id="pingMs" class="text-xl font-extrabold text-green-900">0 ms</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="p-5 space-y-4">
+        <div>
+          <div class="flex items-center justify-between text-xs font-semibold text-green-700 mb-1.5">
+            <span id="lblOldestChecks">آخر 60 فحص (كل 5 ثوانٍ)</span>
+            <span id="lblLiveNow">الآن (Live)</span>
+          </div>
+          <div id="heartbeatStrip" class="grid gap-1 h-9 items-stretch bg-green-50/70 p-1.5 rounded border border-green-200" style="grid-template-columns: repeat(60, minmax(0, 1fr));"></div>
+        </div>
+
+        <!-- CPU / RAM / Disk -->
+        <div class="grid grid-cols-1 md:grid-cols-3 gap-4 pt-1">
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div class="flex justify-between text-xs font-bold text-green-800 mb-1.5">
+              <span>CPU Load</span>
+              <span id="cpuVal">0%</span>
+            </div>
+            <div class="w-full h-2 bg-green-100 rounded overflow-hidden">
+              <div id="cpuBar" class="h-full bg-green-700 transition-all" style="width: 0%"></div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div class="flex justify-between text-xs font-bold text-green-800 mb-1.5">
+              <span>RAM Usage <span id="ramDetail" class="font-normal"></span></span>
+              <span id="ramVal">0%</span>
+            </div>
+            <div class="w-full h-2 bg-green-100 rounded overflow-hidden">
+              <div id="ramBar" class="h-full bg-green-700 transition-all" style="width: 0%"></div>
+            </div>
+          </div>
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div class="flex justify-between text-xs font-bold text-green-800 mb-1.5">
+              <span>Disk Usage <span id="diskDetail" class="font-normal"></span></span>
+              <span id="diskVal">0%</span>
+            </div>
+            <div class="w-full h-2 bg-green-100 rounded overflow-hidden">
+              <div id="diskBar" class="h-full bg-green-700 transition-all" style="width: 0%"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 2: Mail Sending & Anti-Spam Monitor -->
+    <section class="panel rounded-lg overflow-hidden">
+      <div class="panel-header px-5 py-3.5 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h2 id="txtMailTitle" class="text-base font-extrabold text-green-900">حالة الإرسال والـ Mail Queue وكشف الـ Spam والـ Blacklist</h2>
+          <p id="mtaInfo" class="text-xs text-green-700 font-medium mt-0.5"></p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <button onclick="mailQueueAction('flush_queue')" id="btnFlushQueue" class="px-3 py-1 rounded btn-outline-green text-xs font-bold">
+            دفع طابور البريد (Flush Queue)
+          </button>
+          <button onclick="mailQueueAction('clear_deferred')" id="btnClearDeferred" class="px-3 py-1 rounded bg-red-50 hover:bg-red-100 text-red-800 border border-red-300 text-xs font-bold">
+            مسح الرسائل العالقة/السبام
+          </button>
+          <span id="spamStatusBadge" class="px-3 py-1 rounded text-xs font-bold"></span>
+        </div>
+      </div>
+
+      <div class="p-5 space-y-4">
+        <div id="spamWarningsBox" class="hidden p-3.5 rounded bg-amber-50 border border-amber-300 text-amber-900 text-xs font-semibold space-y-1"></div>
+
+        <div class="grid grid-cols-2 md:grid-cols-5 gap-4">
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div id="lblMailSent" class="text-xs font-bold text-green-700">الرسائل المرسلة (Sent)</div>
+            <div id="mailSent" class="text-2xl font-extrabold text-green-900 mt-1">0</div>
+          </div>
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div id="lblMailQueue" class="text-xs font-bold text-green-700">طابور الإرسال (Queue)</div>
+            <div id="mailQueue" class="text-2xl font-extrabold text-green-900 mt-1">0</div>
+          </div>
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div id="lblMailDeferred" class="text-xs font-bold text-green-700">مؤجلة (Deferred)</div>
+            <div id="mailDeferred" class="text-2xl font-extrabold text-amber-800 mt-1">0</div>
+          </div>
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div id="lblMailBounced" class="text-xs font-bold text-green-700">مرتدة (Bounced)</div>
+            <div id="mailBounced" class="text-2xl font-extrabold text-red-800 mt-1">0</div>
+          </div>
+          <div class="p-3.5 rounded bg-green-50/50 border border-green-200">
+            <div id="lblMailRejected" class="text-xs font-bold text-green-700">مرفوضة / سبام (Rejected)</div>
+            <div id="mailRejected" class="text-2xl font-extrabold text-red-800 mt-1">0</div>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="p-4 rounded bg-green-50/40 border border-green-200">
+            <div id="lblRblTitle" class="text-xs font-extrabold text-green-900 mb-2.5">فحص الـ IP في قوائم السبام العالمية (DNSBL / RBL)</div>
+            <div id="rblChecksList" class="space-y-1.5 text-xs"></div>
+          </div>
+          <div class="p-4 rounded bg-green-50/40 border border-green-200">
+            <div id="lblTopSendersTitle" class="text-xs font-extrabold text-green-900 mb-2.5">أكثر الحسابات إرسالاً للبريد (Top Senders)</div>
+            <pre id="topSendersBox" class="text-xs font-mono text-green-900 whitespace-pre-wrap leading-relaxed">No sender data (Requires SSH credentials)</pre>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Section 3: Services Status -->
+    <section class="panel rounded-lg overflow-hidden">
+      <div class="panel-header px-5 py-3.5 flex items-center justify-between">
+        <h2 id="txtServicesTitle" class="text-base font-extrabold text-green-900">حالة الخدمات (Apache • قواعد البيانات • البريد • النظام)</h2>
+      </div>
+      <div id="servicesGrid" class="p-5 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3.5"></div>
+    </section>
+
+    <!-- Section 4: Live Server & Service Logs Viewer with Server Selector -->
+    <section class="panel rounded-lg overflow-hidden">
+      <div class="panel-header px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 id="txtLogsTitle" class="text-base font-extrabold text-green-900">عارض اللوجات المباشر (Live Server & Service Logs)</h2>
+          <p id="logSourceInfo" class="text-xs text-green-700 font-medium"></p>
+        </div>
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="flex items-center gap-1.5">
+            <label for="logServerSelect" id="lblSelectServer" class="text-xs font-bold text-green-900">السيرفر:</label>
+            <select id="logServerSelect" onchange="loadLogs(currentLogType)" class="rounded bg-white border border-green-400 px-3 py-1.5 text-xs font-bold text-green-900 focus:outline-none focus:border-green-700">
+              <option value="{{ server_id }}">{{ server_name }} ({{ server_ip }})</option>
+              <option value="all">جميع السيرفرات (All Servers)</option>
+            </select>
+          </div>
+          <input id="logSearchInput" oninput="filterDisplayedLogs()" type="text" placeholder="بحث في اللوج..."
+            class="rounded bg-white border border-green-400 px-3 py-1.5 text-xs text-green-900 placeholder-green-600 w-44 focus:outline-none focus:border-green-700" />
+          <select id="logLinesSelect" onchange="loadLogs(currentLogType)" class="rounded bg-white border border-green-400 px-2.5 py-1.5 text-xs font-semibold text-green-900">
+            <option value="100">100 Lines</option>
+            <option value="250">250 Lines</option>
+            <option value="500">500 Lines</option>
+          </select>
+          <button onclick="loadLogs(currentLogType)" id="btnRefreshLogs" class="px-3.5 py-1.5 rounded btn-green text-xs font-bold">
+            تحديث اللوج
+          </button>
+        </div>
+      </div>
+
+      <div class="p-5 space-y-3">
+        <div class="flex flex-wrap gap-2 border-b border-green-200 pb-3">
+          <button onclick="loadLogs('mail')" id="tab_mail" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-green">
+            Mail & Spam Logs
+          </button>
+          <button onclick="loadLogs('apache')" id="tab_apache" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Apache / Web Logs
+          </button>
+          <button onclick="loadLogs('db')" id="tab_db" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Database (MySQL/PG) Logs
+          </button>
+          <button onclick="loadLogs('queue')" id="tab_queue" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Mail Queue
+          </button>
+          <button onclick="loadLogs('system')" id="tab_system" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            System / Auth Logs
+          </button>
+          <button onclick="loadLogs('incidents')" id="tab_incidents" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Monitor Events / Outages
+          </button>
+        </div>
+
+        <pre id="logTerminal" dir="ltr" class="log-box rounded p-4 text-xs overflow-x-auto max-h-[460px] overflow-y-auto leading-relaxed whitespace-pre-wrap">Loading logs...</pre>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="max-w-7xl mx-auto px-6 mt-10 pt-5 border-t border-green-200 flex flex-wrap items-center justify-between gap-3 text-xs text-green-800 font-semibold" dir="ltr">
+    <div>
+      <span class="px-2 py-0.5 rounded bg-green-100 text-green-900 font-mono font-bold border border-green-300">Version 1.0</span>
+      <span class="ml-2">Linux Server, Uptime & Mail Monitor</span>
+    </div>
+    <div>
+      Developed by <strong>Eng. Samir Abo El-Khair</strong> — Version 1.0
+    </div>
+  </footer>
+
+  <script>
+    const SERVER_ID = {{ server_id }};
+    let currentLang = localStorage.getItem('mon_lang') || 'ar';
+    let currentLogType = 'mail';
+    let rawLogContent = '';
+    let allServersList = [];
+
+    const I18N = {
+      ar: {
+        dir: 'rtl',
+        langBtn: 'English',
+        backHome: 'العودة للرئيسية',
+        checkNow: 'فحص فوري الآن',
+        uptimeTitle: 'مؤشر الـ Uptime وسجل الاستجابة اللحظي (كل 5 ثوانٍ)',
+        oldestChecks: 'آخر 60 فحص (كل 5 ثوانٍ)',
+        liveNow: 'الآن (مباشر)',
+        mailTitle: 'حالة الإرسال والـ Mail Queue وكشف الـ Spam والـ Blacklist',
+        flushBtn: 'دفع طابور البريد (Flush Queue)',
+        clearBtn: 'مسح الرسائل العالقة/السبام',
+        mailSent: 'الرسائل المرسلة (Sent)',
+        mailQueue: 'طابور الإرسال (Queue)',
+        mailDeferred: 'مؤجلة (Deferred)',
+        mailBounced: 'مرتدة (Bounced)',
+        mailRejected: 'مرفوضة / سبام (Rejected)',
+        rblTitle: 'فحص الـ IP في قوائم السبام العالمية (DNSBL / RBL)',
+        topSenders: 'أكثر الحسابات إرسالاً للبريد (Top Senders)',
+        servicesTitle: 'حالة الخدمات (Apache • قواعد البيانات • البريد • النظام)',
+        logsTitle: 'عارض اللوجات المباشر (Live Server & Service Logs)',
+        selectServer: 'اختر السيرفر:',
+        allServersOpt: 'جميع السيرفرات (All Servers)',
+        refreshLogs: 'تحديث اللوج',
+        searchPlaceholder: 'بحث في اللوج...',
+        online: 'متصل ويعمل (ONLINE)',
+        offline: 'متوقف (DOWN)',
+        spamOk: 'الإرسال سليم ولا يوجد Spam أو حظر',
+        spamWarn: 'يوجد تحذير Spam / Blacklist',
+      },
+      en: {
+        dir: 'ltr',
+        langBtn: 'العربية',
+        backHome: 'Back to Dashboard',
+        checkNow: 'Check Now',
+        uptimeTitle: 'Real-Time Uptime & 5-Second Heartbeat History',
+        oldestChecks: 'Last 60 Checks (Every 5s)',
+        liveNow: 'Now (Live)',
+        mailTitle: 'Mail Sending Status, Queue & Anti-Spam / RBL Monitor',
+        flushBtn: 'Flush Mail Queue',
+        clearBtn: 'Clear Deferred / Spam',
+        mailSent: 'Sent Messages',
+        mailQueue: 'Mail Queue',
+        mailDeferred: 'Deferred',
+        mailBounced: 'Bounced',
+        mailRejected: 'Rejected / Spam',
+        rblTitle: 'Global IP Blacklist Check (DNSBL / RBL)',
+        topSenders: 'Top Email Senders in Logs',
+        servicesTitle: 'Monitored Services (Apache • Databases • Mail • System)',
+        logsTitle: 'Live Server & Service Logs Viewer',
+        selectServer: 'Select Server:',
+        allServersOpt: 'All Servers (جميع السيرفرات)',
+        refreshLogs: 'Refresh Logs',
+        searchPlaceholder: 'Filter logs...',
+        online: 'ONLINE (UP)',
+        offline: 'OFFLINE (DOWN)',
+        spamOk: 'Mail Sending Clean (No Spam / Blacklist)',
+        spamWarn: 'Spam / Blacklist Warning Active',
+      }
+    };
+
+    function applyLanguage() {
+      const t = I18N[currentLang];
+      const root = document.getElementById('htmlRoot');
+      root.lang = currentLang;
+      root.dir = t.dir;
+
+      document.getElementById('btnLang').textContent = t.langBtn;
+      document.getElementById('btnBackHome').textContent = t.backHome;
+      document.getElementById('btnCheckNow').textContent = t.checkNow;
+      document.getElementById('txtUptimeTitle').textContent = t.uptimeTitle;
+      document.getElementById('lblOldestChecks').textContent = t.oldestChecks;
+      document.getElementById('lblLiveNow').textContent = t.liveNow;
+      document.getElementById('txtMailTitle').textContent = t.mailTitle;
+      document.getElementById('btnFlushQueue').textContent = t.flushBtn;
+      document.getElementById('btnClearDeferred').textContent = t.clearBtn;
+      document.getElementById('lblMailSent').textContent = t.mailSent;
+      document.getElementById('lblMailQueue').textContent = t.mailQueue;
+      document.getElementById('lblMailDeferred').textContent = t.mailDeferred;
+      document.getElementById('lblMailBounced').textContent = t.mailBounced;
+      document.getElementById('lblMailRejected').textContent = t.mailRejected;
+      document.getElementById('lblRblTitle').textContent = t.rblTitle;
+      document.getElementById('lblTopSendersTitle').textContent = t.topSenders;
+      document.getElementById('txtServicesTitle').textContent = t.servicesTitle;
+      document.getElementById('txtLogsTitle').textContent = t.logsTitle;
+      document.getElementById('lblSelectServer').textContent = t.selectServer;
+      document.getElementById('btnRefreshLogs').textContent = t.refreshLogs;
+      document.getElementById('logSearchInput').placeholder = t.searchPlaceholder;
+      populateServerDropdown();
+    }
+
+    function toggleLanguage() {
+      currentLang = currentLang === 'ar' ? 'en' : 'ar';
+      localStorage.setItem('mon_lang', currentLang);
+      applyLanguage();
+      loadServerDetail();
+    }
+
+    async function fetchServersListForDropdown() {
+      try {
+        const res = await fetch('/api/overview');
+        const data = await res.json();
+        allServersList = data.servers || [];
+        populateServerDropdown();
+      } catch (e) {}
+    }
+
+    function populateServerDropdown() {
+      const sel = document.getElementById('logServerSelect');
+      const currentVal = sel.value || String(SERVER_ID);
+      const t = I18N[currentLang];
+
+      let html = `<option value="all">${t.allServersOpt}</option>`;
+      for (const s of allServersList) {
+        html += `<option value="${s.id}">${s.name} (${s.ip})</option>`;
+      }
+      if (!allServersList.length) {
+        html += `<option value="${SERVER_ID}">{{ server_name }} ({{ server_ip }})</option>`;
+      }
+      sel.innerHTML = html;
+      sel.value = currentVal;
+    }
+
+    async function loadServerDetail() {
+      try {
+        const res = await fetch(`/api/servers/${SERVER_ID}`);
+        if (!res.ok) return;
+        const d = await res.json();
+        const t = I18N[currentLang];
+
+        const isUp = d.status === 'UP';
+        const statusEl = document.getElementById('srvHeaderStatus');
+        statusEl.className = isUp
+          ? 'px-2.5 py-0.5 rounded text-xs font-bold bg-green-100 text-green-800 border border-green-300'
+          : 'px-2.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-800 border border-red-300';
+        statusEl.textContent = isUp ? t.online : t.offline;
+
+        document.getElementById('lastCheckedAt').textContent = (d.last_checked || '');
+        document.getElementById('uptimeSystemStr').textContent = 'Uptime: ' + (d.uptime_str || '');
+        document.getElementById('up24h').textContent = (d.uptime_24h ?? 100) + '%';
+        document.getElementById('up7d').textContent = (d.uptime_7d ?? 100) + '%';
+        document.getElementById('pingMs').textContent = (d.ping_ms || 0) + ' ms';
+
+        document.getElementById('cpuVal').textContent = (d.cpu_usage || 0) + '%';
+        document.getElementById('cpuBar').style.width = Math.min(100, d.cpu_usage || 0) + '%';
+        document.getElementById('ramVal').textContent = (d.ram_usage || 0) + '%';
+        document.getElementById('ramDetail').textContent = d.ram_detail ? `(${d.ram_detail})` : '';
+        document.getElementById('ramBar').style.width = Math.min(100, d.ram_usage || 0) + '%';
+        document.getElementById('diskVal').textContent = (d.disk_usage || 0) + '%';
+        document.getElementById('diskDetail').textContent = d.disk_detail ? `(${d.disk_detail})` : '';
+        document.getElementById('diskBar').style.width = Math.min(100, d.disk_usage || 0) + '%';
+
+        renderHeartbeats(d.heartbeats || []);
+        renderMailStats(d.mail_stats || {}, d.rbl_status || {});
+        renderServices(d.services || [], d.ssh_connected);
+      } catch (e) {
+        console.error('Detail error:', e);
+      }
+    }
+
+    function renderHeartbeats(beats) {
+      const strip = document.getElementById('heartbeatStrip');
+      const padded = [...beats];
+      while (padded.length < 60) padded.unshift(null);
+      strip.innerHTML = padded.slice(-60).map(b => {
+        if (!b) return `<div class="rounded-sm bg-green-100 h-full"></div>`;
+        const ok = b.status === 'UP';
+        const color = ok ? 'bg-green-600 hover:bg-green-500' : 'bg-red-600 hover:bg-red-500';
+        const tip = `${b.created_at} | ${b.status} | Ping: ${b.ping_ms}ms | Services: ${b.services_up}/${b.services_total}`;
+        return `<div class="rounded-sm ${color} h-full transition cursor-pointer" title="${tip}"></div>`;
+      }).join('');
+    }
+
+    function renderMailStats(mail, rbl) {
+      const t = I18N[currentLang];
+      document.getElementById('mailSent').textContent = (mail.sent_count || 0).toLocaleString();
+      document.getElementById('mailQueue').textContent = (mail.queue_count || 0).toLocaleString();
+      document.getElementById('mailDeferred').textContent = (mail.deferred_count || 0).toLocaleString();
+      document.getElementById('mailBounced').textContent = (mail.bounced_count || 0).toLocaleString();
+      document.getElementById('mailRejected').textContent = (mail.rejected_spam_count || 0).toLocaleString();
+      document.getElementById('mtaInfo').textContent = `MTA: ${mail.mta || 'SMTP'} | Log: ${mail.log_file || 'TCP Port Check'}`;
+
+      const hasSpam = mail.has_spam_issue || rbl.is_blacklisted;
+      const badge = document.getElementById('spamStatusBadge');
+      const warnBox = document.getElementById('spamWarningsBox');
+
+      if (hasSpam) {
+        badge.className = 'px-3 py-1 rounded text-xs font-bold bg-amber-100 text-amber-900 border border-amber-300';
+        badge.textContent = t.spamWarn;
+        warnBox.classList.remove('hidden');
+        warnBox.innerHTML = (mail.spam_warnings || []).map(w => `<div>• ${w}</div>`).join('');
+      } else {
+        badge.className = 'px-3 py-1 rounded text-xs font-bold bg-green-100 text-green-900 border border-green-300';
+        badge.textContent = t.spamOk;
+        warnBox.classList.add('hidden');
+      }
+
+      const rblList = document.getElementById('rblChecksList');
+      const checks = rbl.checks || [];
+      rblList.innerHTML = checks.map(c => {
+        const listed = c.listed;
+        return `
+          <div class="flex items-center justify-between py-1.5 px-2.5 rounded bg-white border ${listed ? 'border-red-300 text-red-800' : 'border-green-200 text-green-900'}">
+            <span class="font-semibold">${c.provider} <span class="text-[11px] text-green-700 font-mono">(${c.zone})</span></span>
+            <span class="font-bold ${listed ? 'text-red-700' : 'text-green-800'}">${listed ? 'LISTED' : 'CLEAN'}</span>
+          </div>
+        `;
+      }).join('');
+
+      const senders = mail.top_senders || [];
+      if (senders.length) {
+        document.getElementById('topSendersBox').textContent = senders.join('\n');
+      }
+    }
+
+    function renderServices(services, sshConnected) {
+      const grid = document.getElementById('servicesGrid');
+      grid.innerHTML = services.map(s => {
+        const ok = s.status === 'UP';
+        const restartBtn = (sshConnected && s.systemd_unit)
+          ? `<button onclick="restartService('${s.systemd_unit}')" class="px-2.5 py-1 rounded btn-outline-green text-[11px] font-bold">Restart</button>`
+          : '';
+        return `
+          <div class="p-4 rounded bg-white border ${ok ? 'border-green-300' : 'border-red-400'} flex flex-col justify-between gap-2">
+            <div class="flex items-start justify-between gap-2">
+              <div>
+                <div class="text-sm font-extrabold text-green-900">${s.name}</div>
+                <div class="text-[11px] text-green-700 font-mono mt-0.5">${s.port ? 'Port ' + s.port : s.source} ${s.latency_ms ? '• ' + s.latency_ms + 'ms' : ''}</div>
+              </div>
+              <span class="px-2 py-0.5 rounded text-xs font-bold ${ok ? 'bg-green-100 text-green-800 border border-green-300' : 'bg-red-100 text-red-800 border border-red-300'}">
+                ${ok ? 'UP' : 'DOWN'}
+              </span>
+            </div>
+            <div class="flex items-center justify-between pt-2 border-t border-green-100 text-[11px] text-green-800">
+              <span class="truncate max-w-[210px] font-mono" title="${s.detail || ''}">${s.detail || ''}</span>
+              ${restartBtn}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    async function triggerImmediateCheck() {
+      await fetch(`/api/servers/${SERVER_ID}/check-now`, { method: 'POST' });
+      await loadServerDetail();
+    }
+
+    async function restartService(unitName) {
+      if (!confirm(`Restart service ${unitName}?`)) return;
+      const res = await fetch(`/api/servers/${SERVER_ID}/service-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service_name: unitName, action: 'restart' }),
+      });
+      const data = await res.json();
+      alert(data.message || 'Done');
+      loadServerDetail();
+    }
+
+    async function mailQueueAction(actionType) {
+      if (!confirm(`Run mail queue action: ${actionType}?`)) return;
+      const res = await fetch(`/api/servers/${SERVER_ID}/service-action`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ service_name: 'mailq', action: actionType }),
+      });
+      const data = await res.json();
+      alert(data.message || 'Done');
+      loadServerDetail();
+    }
+
+    async function loadLogs(logType) {
+      currentLogType = logType;
+      document.querySelectorAll('.log-tab').forEach(btn => {
+        btn.className = 'log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green';
+      });
+      const activeTab = document.getElementById('tab_' + logType);
+      if (activeTab) {
+        activeTab.className = 'log-tab px-3 py-1.5 rounded text-xs font-bold btn-green';
+      }
+
+      const selectedServer = document.getElementById('logServerSelect').value || String(SERVER_ID);
+      const lines = document.getElementById('logLinesSelect').value || 100;
+      const term = document.getElementById('logTerminal');
+      term.textContent = 'Loading logs...';
+
+      const res = await fetch(`/api/logs?server_id=${encodeURIComponent(selectedServer)}&log_type=${encodeURIComponent(logType)}&lines=${lines}`);
+      const data = await res.json();
+      rawLogContent = data.content || '';
+      document.getElementById('logSourceInfo').textContent = `Source: ${data.source || 'SSH'} | Type: ${logType.toUpperCase()}`;
+      filterDisplayedLogs();
+    }
+
+    function filterDisplayedLogs() {
+      const q = (document.getElementById('logSearchInput').value || '').trim().toLowerCase();
+      const term = document.getElementById('logTerminal');
+      if (!q) {
+        term.textContent = rawLogContent;
+        return;
+      }
+      const filtered = rawLogContent
+        .split('\n')
+        .filter(line => line.toLowerCase().includes(q))
+        .join('\n');
+      term.textContent = filtered || `No matching lines for "${q}"`;
+    }
+
+    applyLanguage();
+    fetchServersListForDropdown().then(() => {
+      document.getElementById('logServerSelect').value = String(SERVER_ID);
+      loadLogs('mail');
+    });
+    loadServerDetail();
+    setInterval(loadServerDetail, 5000);
+  </script>
+</body>
+</html>

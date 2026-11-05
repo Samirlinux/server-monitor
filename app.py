@@ -21,7 +21,10 @@ from monitor_engine import (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "monitor.db")
-templates = Jinja2Templates(directory=os.path.join(BASE_DIR, "templates"))
+TEMPLATE_DIRS = [
+    d for d in [os.path.join(BASE_DIR, "templates"), BASE_DIR] if os.path.isdir(d)
+]
+templates = Jinja2Templates(directory=TEMPLATE_DIRS)
 
 
 def get_db() -> sqlite3.Connection:
@@ -413,7 +416,7 @@ class SettingsPayload(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
-    return templates.TemplateResponse("index.html", {"request": request})
+    return templates.TemplateResponse(request=request, name="index.html", context={})
 
 
 @app.get("/server/{server_id}", response_class=HTMLResponse)
@@ -424,8 +427,9 @@ async def server_detail_page(request: Request, server_id: int):
     if not srv:
         raise HTTPException(status_code=404, detail="السيرفر غير موجود")
     return templates.TemplateResponse(
-        "server_detail.html",
-        {"request": request, "server_id": server_id, "server_name": srv["name"], "server_ip": srv["ip"]},
+        request=request,
+        name="server_detail.html",
+        context={"server_id": server_id, "server_name": srv["name"], "server_ip": srv["ip"]},
     )
 
 

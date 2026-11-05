@@ -1,0 +1,833 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl" id="htmlRoot">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Server & Mail Uptime Monitor | Eng. Samir Abo El-Khair</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@500;600;700;800&family=Inter:wght@500;600;700&display=swap" rel="stylesheet">
+  <style>
+    body {
+      font-family: 'Cairo', 'Inter', sans-serif;
+      background-color: #ffffff;
+      color: #14532d;
+    }
+    .panel {
+      background-color: #ffffff;
+      border: 1px solid #bbf7d0;
+      box-shadow: 0 1px 3px rgba(20, 83, 45, 0.05);
+    }
+    .panel-header {
+      background-color: #f0fdf4;
+      border-bottom: 1px solid #bbf7d0;
+    }
+    .btn-green {
+      background-color: #15803d;
+      color: #ffffff;
+    }
+    .btn-green:hover {
+      background-color: #166534;
+    }
+    .btn-outline-green {
+      background-color: #ffffff;
+      color: #15803d;
+      border: 1px solid #86efac;
+    }
+    .btn-outline-green:hover {
+      background-color: #f0fdf4;
+    }
+    .log-box {
+      background-color: #f8fafc;
+      color: #14532d;
+      border: 1px solid #bbf7d0;
+      font-family: Consolas, Monaco, 'Courier New', monospace;
+    }
+  </style>
+</head>
+<body class="min-h-screen pb-14">
+
+  <!-- Top Navigation Bar -->
+  <header class="bg-white border-b-2 border-green-700 sticky top-0 z-30 px-6 py-3.5">
+    <div class="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
+      <div>
+        <div class="flex items-center gap-3">
+          <h1 id="txtAppTitle" class="text-xl font-extrabold text-green-900">نظام مراقبة السيرفرات والـ Uptime والبريد</h1>
+          <span class="px-2.5 py-0.5 rounded text-xs font-bold bg-green-100 text-green-800 border border-green-300 font-mono">Version 1.0</span>
+        </div>
+        <p class="text-xs text-green-700 mt-0.5 font-semibold">
+          Developed by <strong>Eng. Samir Abo El-Khair</strong> — <span id="txtSubtitle">فحص تلقائي كل 5 ثوانٍ للخدمات والبريد والـ Spam</span>
+        </p>
+      </div>
+
+      <div class="flex flex-wrap items-center gap-2.5">
+        <span class="text-xs px-3 py-1.5 rounded bg-green-50 text-green-800 border border-green-300 font-semibold flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-green-600"></span>
+          <span id="txtAutoRefresh">تحديث كل 5 ثوانٍ</span>
+        </span>
+
+        <button onclick="toggleLanguage()" id="btnLang" class="px-3.5 py-1.5 rounded btn-outline-green text-xs font-bold transition">
+          English
+        </button>
+
+        <button onclick="openSettingsModal()" id="btnAlertSettings" class="px-3.5 py-1.5 rounded btn-outline-green text-xs font-bold transition">
+          إعدادات Telegram & Slack
+        </button>
+
+        <button onclick="openAddServerModal()" id="btnAddServer" class="px-4 py-1.5 rounded btn-green text-xs font-bold transition">
+          + إضافة سيرفر جديد
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <main class="max-w-7xl mx-auto px-6 mt-6 space-y-6">
+
+    <!-- Summary Bar -->
+    <section class="grid grid-cols-2 md:grid-cols-5 gap-4">
+      <div class="panel rounded-lg p-4">
+        <div id="lblSumTotal" class="text-xs font-bold text-green-700">إجمالي السيرفرات</div>
+        <div id="sumTotal" class="text-2xl font-extrabold text-green-900 mt-1">0</div>
+      </div>
+      <div class="panel rounded-lg p-4">
+        <div id="lblSumUp" class="text-xs font-bold text-green-700">سيرفرات تعمل (ONLINE)</div>
+        <div id="sumUp" class="text-2xl font-extrabold text-green-700 mt-1">0</div>
+      </div>
+      <div class="panel rounded-lg p-4">
+        <div id="lblSumDown" class="text-xs font-bold text-green-700">سيرفرات متوقفة (DOWN)</div>
+        <div id="sumDown" class="text-2xl font-extrabold text-red-700 mt-1">0</div>
+      </div>
+      <div class="panel rounded-lg p-4">
+        <div id="lblSumSent" class="text-xs font-bold text-green-700">إجمالي الرسائل المرسلة</div>
+        <div id="sumSent" class="text-2xl font-extrabold text-green-900 mt-1">0</div>
+      </div>
+      <div class="panel rounded-lg p-4">
+        <div id="lblSumSpam" class="text-xs font-bold text-green-700">تنبيهات Spam / Blacklist</div>
+        <div id="sumSpam" class="text-2xl font-extrabold text-amber-700 mt-1">0</div>
+      </div>
+    </section>
+
+    <!-- Monitored Servers Section -->
+    <section>
+      <div class="flex items-center justify-between mb-3">
+        <h2 id="txtServersHeading" class="text-base font-extrabold text-green-900">قائمة السيرفرات وحالة الخدمات والإرسال</h2>
+        <span id="lastSyncTime" class="text-xs font-semibold text-green-700"></span>
+      </div>
+
+      <div id="serversGrid" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <!-- Populated dynamically -->
+      </div>
+    </section>
+
+    <!-- Global & Per-Server Live Logs Viewer -->
+    <section class="panel rounded-lg overflow-hidden">
+      <div class="panel-header px-5 py-3.5 flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 id="txtLogsHeading" class="text-base font-extrabold text-green-900">عارض اللوجات المباشر (Live Server & Service Logs)</h2>
+          <p id="logSourceInfo" class="text-xs text-green-700 font-medium">عرض لوجات جميع السيرفرات أو اختيار سيرفر محدد من القائمة</p>
+        </div>
+
+        <div class="flex flex-wrap items-center gap-2">
+          <!-- Server Selector Dropdown -->
+          <div class="flex items-center gap-1.5">
+            <label for="logServerSelect" id="lblSelectServer" class="text-xs font-bold text-green-900">السيرفر:</label>
+            <select id="logServerSelect" onchange="loadLogs(currentLogType)" class="rounded bg-white border border-green-400 px-3 py-1.5 text-xs font-bold text-green-900 focus:outline-none focus:border-green-700">
+              <option value="all">جميع السيرفرات (All Servers)</option>
+            </select>
+          </div>
+
+          <!-- Search inside logs -->
+          <input id="logSearchInput" oninput="filterDisplayedLogs()" type="text" placeholder="بحث في اللوج..."
+            class="rounded bg-white border border-green-400 px-3 py-1.5 text-xs text-green-900 placeholder-green-600 w-44 focus:outline-none focus:border-green-700" />
+
+          <!-- Lines Count -->
+          <select id="logLinesSelect" onchange="loadLogs(currentLogType)" class="rounded bg-white border border-green-400 px-2.5 py-1.5 text-xs font-semibold text-green-900">
+            <option value="100">100 Lines</option>
+            <option value="250">250 Lines</option>
+            <option value="500">500 Lines</option>
+          </select>
+
+          <button onclick="loadLogs(currentLogType)" id="btnRefreshLogs" class="px-3.5 py-1.5 rounded btn-green text-xs font-bold">
+            تحديث اللوج
+          </button>
+        </div>
+      </div>
+
+      <div class="p-5 space-y-3">
+        <!-- Log Type Tabs -->
+        <div class="flex flex-wrap gap-2 border-b border-green-200 pb-3">
+          <button onclick="loadLogs('mail')" id="tab_mail" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-green">
+            Mail & Spam Logs
+          </button>
+          <button onclick="loadLogs('apache')" id="tab_apache" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Apache / Web Logs
+          </button>
+          <button onclick="loadLogs('db')" id="tab_db" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Database (MySQL/PG) Logs
+          </button>
+          <button onclick="loadLogs('queue')" id="tab_queue" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Mail Queue
+          </button>
+          <button onclick="loadLogs('system')" id="tab_system" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            System / Auth Logs
+          </button>
+          <button onclick="loadLogs('incidents')" id="tab_incidents" class="log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green">
+            Monitor Events / Outages
+          </button>
+        </div>
+
+        <pre id="logTerminal" dir="ltr" class="log-box rounded p-4 text-xs overflow-x-auto max-h-[420px] overflow-y-auto leading-relaxed whitespace-pre-wrap">Loading logs...</pre>
+      </div>
+    </section>
+
+    <!-- Recent Alerts & Incidents Table -->
+    <section class="panel rounded-lg overflow-hidden">
+      <div class="panel-header px-5 py-3 flex items-center justify-between">
+        <h2 id="txtIncidentsHeading" class="text-base font-extrabold text-green-900">سجل التنبيهات والأحداث الأخيرة (Telegram & Slack)</h2>
+      </div>
+      <div class="overflow-x-auto p-4">
+        <table class="w-full text-sm">
+          <thead class="text-xs font-bold text-green-800 bg-green-50 border-b border-green-200">
+            <tr>
+              <th id="thTime" class="py-2.5 px-3 text-start">الوقت</th>
+              <th id="thState" class="py-2.5 px-3 text-start">الحالة</th>
+              <th id="thServer" class="py-2.5 px-3 text-start">السيرفر</th>
+              <th id="thService" class="py-2.5 px-3 text-start">الخدمة</th>
+              <th id="thDetails" class="py-2.5 px-3 text-start">التفاصيل</th>
+            </tr>
+          </thead>
+          <tbody id="incidentsBody" class="divide-y divide-green-100 text-green-900"></tbody>
+        </table>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- Footer -->
+  <footer class="max-w-7xl mx-auto px-6 mt-10 pt-5 border-t border-green-200 flex flex-wrap items-center justify-between gap-3 text-xs text-green-800 font-semibold" dir="ltr">
+    <div>
+      <span class="px-2 py-0.5 rounded bg-green-100 text-green-900 font-mono font-bold border border-green-300">Version 1.0</span>
+      <span class="ml-2">Linux Server, Uptime & Mail Monitor</span>
+    </div>
+    <div>
+      Developed by <strong>Eng. Samir Abo El-Khair</strong> — Version 1.0
+    </div>
+  </footer>
+
+  <!-- Add / Edit Server Modal -->
+  <div id="serverModal" class="fixed inset-0 bg-black/40 z-50 hidden items-center justify-center p-4">
+    <div class="bg-white rounded-lg max-w-xl w-full p-6 border-2 border-green-700 max-h-[92vh] overflow-y-auto shadow-xl">
+      <div class="flex items-center justify-between border-b border-green-200 pb-3 mb-4">
+        <h3 id="modalTitle" class="text-base font-extrabold text-green-900">إضافة سيرفر للمراقبة</h3>
+        <button onclick="closeServerModal()" class="text-green-800 hover:text-green-950 font-bold text-lg">✕</button>
+      </div>
+
+      <form id="serverForm" onsubmit="saveServer(event)" class="space-y-4 text-green-900">
+        <input type="hidden" id="srvId" value="" />
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label id="lblSrvName" class="block text-xs font-bold mb-1">اسم السيرفر *</label>
+            <input id="srvName" type="text" required placeholder="Main Web Server"
+              class="w-full rounded bg-white border border-green-400 px-3 py-2 text-sm text-green-900 focus:border-green-700 focus:outline-none" />
+          </div>
+          <div>
+            <label id="lblSrvIp" class="block text-xs font-bold mb-1">عنوان الـ IP أو الدومين *</label>
+            <input id="srvIp" type="text" required placeholder="192.168.1.50"
+              class="w-full rounded bg-white border border-green-400 px-3 py-2 text-sm text-green-900 dir-ltr text-left focus:border-green-700 focus:outline-none" />
+          </div>
+        </div>
+
+        <div id="txtModalHint" class="p-3 rounded bg-green-50 border border-green-300 text-xs text-green-800 leading-relaxed">
+          بمجرد إضافة الـ IP فقط، يفحص النظام تلقائياً خدمات Apache (80/443) وقواعد البيانات (3306/5432) والبريد SMTP (25/587/465) وقوائم الحظر (Blacklists) كل 5 ثوانٍ. أضف بيانات الـ SSH بالأسفل لقراءة اللوجات وعدد الرسائل المرسلة وطابور الإرسال.
+        </div>
+
+        <!-- Optional SSH Section -->
+        <div class="border border-green-200 rounded p-4 space-y-3 bg-green-50/40">
+          <div id="txtSshTitle" class="text-xs font-extrabold text-green-900">بيانات اتصال SSH (اختياري - لقراءة اللوجات وعدد الرسائل وحالة systemd)</div>
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div>
+              <label class="block text-xs font-bold mb-1">SSH User</label>
+              <input id="srvUser" type="text" value="root"
+                class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-sm text-green-900" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold mb-1">SSH Port</label>
+              <input id="srvPort" type="number" value="22"
+                class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-sm text-green-900" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold mb-1">SSH Password</label>
+              <input id="srvPass" type="password"
+                class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-sm text-green-900" />
+            </div>
+          </div>
+          <div>
+            <label class="block text-xs font-bold mb-1">SSH Private Key (Optional)</label>
+            <textarea id="srvKey" rows="2" placeholder="-----BEGIN OPENSSH PRIVATE KEY-----"
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-xs font-mono text-green-900"></textarea>
+          </div>
+        </div>
+
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div>
+            <label id="lblQueueLimit" class="block text-xs font-bold mb-1">حد التنبيه لطابور البريد (Mail Queue Limit)</label>
+            <input id="srvQueueLimit" type="number" value="100"
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-sm text-green-900" />
+          </div>
+          <div>
+            <label id="lblSpamLimit" class="block text-xs font-bold mb-1">حد التنبيه للرسائل المرتدة/السبام (Bounce/Spam)</label>
+            <input id="srvSpamLimit" type="number" value="20"
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-sm text-green-900" />
+          </div>
+        </div>
+
+        <div class="flex items-center justify-end gap-2 pt-3 border-t border-green-200">
+          <button type="button" onclick="closeServerModal()" class="px-4 py-1.5 rounded btn-outline-green text-xs font-bold">إلغاء / Cancel</button>
+          <button type="submit" class="px-5 py-1.5 rounded btn-green text-xs font-bold">حفظ / Save</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Settings Modal (Telegram & Slack) -->
+  <div id="settingsModal" class="fixed inset-0 bg-black/40 z-50 hidden items-center justify-center p-4">
+    <div class="bg-white rounded-lg max-w-lg w-full p-6 border-2 border-green-700 shadow-xl text-green-900">
+      <div class="flex items-center justify-between border-b border-green-200 pb-3 mb-4">
+        <h3 class="text-base font-extrabold text-green-900">إعدادات التنبيه الفوري (Telegram & Slack Alerts)</h3>
+        <button onclick="closeSettingsModal()" class="text-green-800 hover:text-green-950 font-bold text-lg">✕</button>
+      </div>
+
+      <form onsubmit="saveSettings(event)" class="space-y-4">
+        <div class="p-4 rounded bg-green-50/60 border border-green-200 space-y-3">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input id="tgEnabled" type="checkbox" class="w-4 h-4 accent-green-700" />
+            <span class="text-sm font-extrabold text-green-900">Enable Telegram Bot Alerts / تفعيل تليجرام</span>
+          </label>
+          <div>
+            <label class="block text-xs font-bold mb-1">Bot Token</label>
+            <input id="tgToken" type="text" placeholder="123456789:ABCdef..."
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-xs font-mono text-green-900" />
+          </div>
+          <div>
+            <label class="block text-xs font-bold mb-1">Chat ID</label>
+            <input id="tgChatId" type="text" placeholder="-1001234567890"
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-xs font-mono text-green-900" />
+          </div>
+        </div>
+
+        <div class="p-4 rounded bg-green-50/60 border border-green-200 space-y-3">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input id="slackEnabled" type="checkbox" class="w-4 h-4 accent-green-700" />
+            <span class="text-sm font-extrabold text-green-900">Enable Slack Webhook Alerts / تفعيل سلاك</span>
+          </label>
+          <div>
+            <label class="block text-xs font-bold mb-1">Slack Webhook URL</label>
+            <input id="slackWebhook" type="text" placeholder="https://hooks.slack.com/services/..."
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-xs font-mono text-green-900" />
+          </div>
+        </div>
+
+        <div class="grid grid-cols-2 gap-3">
+          <div>
+            <label class="block text-xs font-bold mb-1">Check Interval (Seconds)</label>
+            <input id="chkInterval" type="number" min="3" max="60" value="5"
+              class="w-full rounded bg-white border border-green-400 px-3 py-1.5 text-sm text-green-900" />
+          </div>
+          <div class="flex flex-col justify-end gap-1.5 text-xs font-semibold">
+            <label class="flex items-center gap-2">
+              <input id="alertRecovery" type="checkbox" checked class="accent-green-700" />
+              Alert on Recovery (UP)
+            </label>
+            <label class="flex items-center gap-2">
+              <input id="alertSpam" type="checkbox" checked class="accent-green-700" />
+              Alert on Spam / Blacklist
+            </label>
+          </div>
+        </div>
+
+        <div id="testAlertMsg" class="text-xs hidden p-2.5 rounded border border-green-300 bg-green-50 text-green-900"></div>
+
+        <div class="flex items-center justify-between pt-3 border-t border-green-200">
+          <button type="button" onclick="sendTestAlert()" class="px-3.5 py-1.5 rounded btn-outline-green text-xs font-bold">
+            Test Alert / إرسال تنبيه تجريبي
+          </button>
+          <div class="flex items-center gap-2">
+            <button type="button" onclick="closeSettingsModal()" class="px-4 py-1.5 rounded btn-outline-green text-xs font-bold">Close</button>
+            <button type="submit" class="px-5 py-1.5 rounded btn-green text-xs font-bold">Save / حفظ</button>
+          </div>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <script>
+    let currentLang = localStorage.getItem('mon_lang') || 'ar';
+    let cachedServers = [];
+    let currentLogType = 'mail';
+    let rawLogContent = '';
+
+    const I18N = {
+      ar: {
+        dir: 'rtl',
+        langBtn: 'English',
+        appTitle: 'نظام مراقبة السيرفرات والـ Uptime والبريد',
+        subtitle: 'فحص تلقائي كل 5 ثوانٍ للخدمات والبريد والـ Spam',
+        autoRefresh: 'تحديث كل 5 ثوانٍ',
+        alertSettings: 'إعدادات Telegram & Slack',
+        addServer: '+ إضافة سيرفر جديد',
+        sumTotal: 'إجمالي السيرفرات',
+        sumUp: 'سيرفرات متصلة (UP)',
+        sumDown: 'سيرفرات متوقفة (DOWN)',
+        sumSent: 'إجمالي الرسائل المرسلة',
+        sumSpam: 'تنبيهات Spam / Blacklist',
+        serversHeading: 'قائمة السيرفرات وحالة الخدمات والإرسال',
+        logsHeading: 'عارض اللوجات المباشر (Live Server & Service Logs)',
+        selectServer: 'اختر السيرفر:',
+        allServersOpt: 'جميع السيرفرات (All Servers)',
+        refreshLogs: 'تحديث اللوج',
+        searchPlaceholder: 'بحث في اللوج...',
+        incidentsHeading: 'سجل التنبيهات والأحداث الأخيرة (Telegram & Slack)',
+        thTime: 'الوقت',
+        thState: 'الحالة',
+        thServer: 'السيرفر',
+        thService: 'الخدمة',
+        thDetails: 'التفاصيل',
+        noServers: 'لا توجد سيرفرات مضافة حتى الآن. اضغط على "+ إضافة سيرفر جديد" للبدء.',
+        openServerPage: 'صفحة الـ Uptime واللوجات المنفصلة',
+        editBtn: 'تعديل',
+        deleteBtn: 'حذف',
+        statusUp: 'متصل (UP)',
+        statusDown: 'متوقف (DOWN)',
+        sentLabel: 'الرسائل المرسلة',
+        queueLabel: 'طابور البريد (Queue)',
+        rblClean: 'سليم (Clean)',
+        rblListed: 'محظور (Listed)',
+        servicesLabel: 'حالة الخدمات (Apache / DB / Mail / SSH):',
+        lastCheck: 'آخر فحص: ',
+      },
+      en: {
+        dir: 'ltr',
+        langBtn: 'العربية',
+        appTitle: 'Linux Server, Uptime & Mail Monitor',
+        subtitle: '5-Second Real-Time Service, Mail Queue & Anti-Spam Monitoring',
+        autoRefresh: 'Auto-Refresh (5s)',
+        alertSettings: 'Telegram & Slack Alerts',
+        addServer: '+ Add New Server',
+        sumTotal: 'Total Servers',
+        sumUp: 'Online Servers (UP)',
+        sumDown: 'Offline Servers (DOWN)',
+        sumSent: 'Total Sent Emails',
+        sumSpam: 'Spam / Blacklist Alerts',
+        serversHeading: 'Monitored Servers, Services & Mail Status',
+        logsHeading: 'Live Server & Service Logs Viewer',
+        selectServer: 'Select Server:',
+        allServersOpt: 'All Servers (جميع السيرفرات)',
+        refreshLogs: 'Refresh Logs',
+        searchPlaceholder: 'Filter logs...',
+        incidentsHeading: 'Recent Incidents & Alert Logs (Telegram & Slack)',
+        thTime: 'Timestamp',
+        thState: 'Severity',
+        thServer: 'Server',
+        thService: 'Service',
+        thDetails: 'Details',
+        noServers: 'No servers added yet. Click "+ Add New Server" to start monitoring.',
+        openServerPage: 'Dedicated Uptime & Logs Page',
+        editBtn: 'Edit',
+        deleteBtn: 'Delete',
+        statusUp: 'ONLINE (UP)',
+        statusDown: 'OFFLINE (DOWN)',
+        sentLabel: 'Sent Emails',
+        queueLabel: 'Mail Queue',
+        rblClean: 'Clean',
+        rblListed: 'Blacklisted',
+        servicesLabel: 'Services Status (Apache / DB / Mail / SSH):',
+        lastCheck: 'Last Check: ',
+      }
+    };
+
+    function applyLanguage() {
+      const t = I18N[currentLang];
+      const root = document.getElementById('htmlRoot');
+      root.lang = currentLang;
+      root.dir = t.dir;
+
+      document.getElementById('btnLang').textContent = t.langBtn;
+      document.getElementById('txtAppTitle').textContent = t.appTitle;
+      document.getElementById('txtSubtitle').textContent = t.subtitle;
+      document.getElementById('txtAutoRefresh').textContent = t.autoRefresh;
+      document.getElementById('btnAlertSettings').textContent = t.alertSettings;
+      document.getElementById('btnAddServer').textContent = t.addServer;
+
+      document.getElementById('lblSumTotal').textContent = t.sumTotal;
+      document.getElementById('lblSumUp').textContent = t.sumUp;
+      document.getElementById('lblSumDown').textContent = t.sumDown;
+      document.getElementById('lblSumSent').textContent = t.sumSent;
+      document.getElementById('lblSumSpam').textContent = t.sumSpam;
+
+      document.getElementById('txtServersHeading').textContent = t.serversHeading;
+      document.getElementById('txtLogsHeading').textContent = t.logsHeading;
+      document.getElementById('lblSelectServer').textContent = t.selectServer;
+      document.getElementById('btnRefreshLogs').textContent = t.refreshLogs;
+      document.getElementById('logSearchInput').placeholder = t.searchPlaceholder;
+      document.getElementById('txtIncidentsHeading').textContent = t.incidentsHeading;
+
+      document.getElementById('thTime').textContent = t.thTime;
+      document.getElementById('thState').textContent = t.thState;
+      document.getElementById('thServer').textContent = t.thServer;
+      document.getElementById('thService').textContent = t.thService;
+      document.getElementById('thDetails').textContent = t.thDetails;
+
+      populateServerDropdown();
+      renderServers(cachedServers);
+    }
+
+    function toggleLanguage() {
+      currentLang = currentLang === 'ar' ? 'en' : 'ar';
+      localStorage.setItem('mon_lang', currentLang);
+      applyLanguage();
+    }
+
+    function populateServerDropdown() {
+      const select = document.getElementById('logServerSelect');
+      const currentVal = select.value || 'all';
+      const t = I18N[currentLang];
+
+      let html = `<option value="all">${t.allServersOpt}</option>`;
+      for (const srv of cachedServers) {
+        html += `<option value="${srv.id}">${srv.name} (${srv.ip})</option>`;
+      }
+      select.innerHTML = html;
+      if ([...select.options].some(o => o.value === currentVal)) {
+        select.value = currentVal;
+      }
+    }
+
+    async function loadOverview() {
+      try {
+        const res = await fetch('/api/overview');
+        const data = await res.json();
+        const prevCount = cachedServers.length;
+        cachedServers = data.servers || [];
+
+        const t = I18N[currentLang];
+        document.getElementById('sumTotal').textContent = data.summary.total_servers;
+        document.getElementById('sumUp').textContent = data.summary.up_servers;
+        document.getElementById('sumDown').textContent = data.summary.down_servers;
+        document.getElementById('sumSent').textContent = data.summary.total_sent_emails.toLocaleString();
+        document.getElementById('sumSpam').textContent = data.summary.total_spam_alerts;
+        document.getElementById('lastSyncTime').textContent = t.lastCheck + data.summary.server_time;
+
+        populateServerDropdown();
+        renderServers(cachedServers);
+        renderIncidents(data.incidents || []);
+
+        if (prevCount === 0 && cachedServers.length > 0) {
+          loadLogs(currentLogType);
+        }
+      } catch (e) {
+        console.error('Overview error:', e);
+      }
+    }
+
+    function renderServers(servers) {
+      const grid = document.getElementById('serversGrid');
+      const t = I18N[currentLang];
+
+      if (!servers.length) {
+        grid.innerHTML = `
+          <div class="col-span-full panel rounded-lg p-8 text-center">
+            <p class="text-sm font-bold text-green-800">${t.noServers}</p>
+          </div>
+        `;
+        return;
+      }
+
+      grid.innerHTML = servers.map(srv => {
+        const isUp = srv.status === 'UP';
+        const isDown = srv.status === 'DOWN';
+        const mail = srv.mail_stats || {};
+        const rbl = srv.rbl_status || {};
+        const hasSpam = mail.has_spam_issue || rbl.is_blacklisted;
+
+        const statusBadge = isUp
+          ? `<span class="px-2.5 py-0.5 rounded text-xs font-bold bg-green-100 text-green-800 border border-green-300">${t.statusUp}</span>`
+          : isDown
+          ? `<span class="px-2.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-800 border border-red-300">${t.statusDown}</span>`
+          : `<span class="px-2.5 py-0.5 rounded text-xs font-bold bg-green-50 text-green-700 border border-green-200">Checking...</span>`;
+
+        const svcs = srv.services || [];
+        const servicePills = svcs.slice(0, 6).map(s => {
+          const ok = s.status === 'UP';
+          const cls = ok
+            ? 'bg-green-50 text-green-800 border-green-300'
+            : 'bg-red-50 text-red-800 border-red-300';
+          return `<span class="text-[11px] font-semibold px-2 py-0.5 rounded border ${cls}">${ok ? 'UP' : 'DOWN'}: ${s.name.replace(' (systemd)', '')}</span>`;
+        }).join('');
+
+        const spamBanner = hasSpam
+          ? `<div class="mt-3 p-2 rounded bg-amber-50 border border-amber-300 text-amber-900 text-xs font-semibold">
+               Spam / Mail Warning: ${(mail.spam_warnings || []).join(' | ') || 'IP Listed on RBL'}
+             </div>`
+          : '';
+
+        return `
+          <div class="panel rounded-lg p-5 flex flex-col justify-between">
+            <div>
+              <div class="flex items-start justify-between gap-2 border-b border-green-100 pb-3">
+                <div>
+                  <a href="/server/${srv.id}" class="text-base font-extrabold text-green-900 hover:underline">${srv.name}</a>
+                  <div class="text-xs font-mono text-green-700">${srv.ip}</div>
+                </div>
+                ${statusBadge}
+              </div>
+
+              <div class="grid grid-cols-3 gap-2 mt-3 p-2.5 rounded bg-green-50/70 border border-green-200 text-center">
+                <div>
+                  <div class="text-[11px] font-semibold text-green-700">Uptime (24h)</div>
+                  <div class="text-sm font-extrabold text-green-900">${srv.uptime_24h ?? 100}%</div>
+                </div>
+                <div>
+                  <div class="text-[11px] font-semibold text-green-700">Ping</div>
+                  <div class="text-sm font-extrabold text-green-900">${srv.ping_ms || 0} ms</div>
+                </div>
+                <div>
+                  <div class="text-[11px] font-semibold text-green-700">${t.sentLabel}</div>
+                  <div class="text-sm font-extrabold text-green-900">${(mail.sent_count || 0).toLocaleString()}</div>
+                </div>
+              </div>
+
+              <div class="flex items-center justify-between text-xs font-semibold text-green-800 mt-3">
+                <span>${t.queueLabel}: <strong>${mail.queue_count || 0}</strong></span>
+                <span>Blacklist: <strong class="${rbl.is_blacklisted ? 'text-red-700' : 'text-green-800'}">${rbl.is_blacklisted ? t.rblListed + ' (' + rbl.listed_count + ')' : t.rblClean}</strong></span>
+              </div>
+
+              ${spamBanner}
+
+              <div class="mt-3">
+                <div class="text-[11px] font-bold text-green-700 mb-1.5">${t.servicesLabel}</div>
+                <div class="flex flex-wrap gap-1.5">${servicePills}</div>
+              </div>
+            </div>
+
+            <div class="mt-4 pt-3 border-t border-green-100 flex items-center justify-between gap-2">
+              <a href="/server/${srv.id}" class="flex-1 text-center py-1.5 px-3 rounded btn-green text-xs font-bold transition">
+                ${t.openServerPage}
+              </a>
+              <button onclick="selectServerLogs(${srv.id})" class="px-2.5 py-1.5 rounded btn-outline-green text-xs font-bold" title="View Logs">Logs</button>
+              <button onclick="openEditServerModal(${srv.id})" class="px-2.5 py-1.5 rounded btn-outline-green text-xs font-bold">${t.editBtn}</button>
+              <button onclick="deleteServer(${srv.id}, '${srv.name}')" class="px-2.5 py-1.5 rounded bg-red-50 hover:bg-red-100 text-red-800 border border-red-300 text-xs font-bold">${t.deleteBtn}</button>
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function selectServerLogs(serverId) {
+      const sel = document.getElementById('logServerSelect');
+      sel.value = String(serverId);
+      loadLogs(currentLogType);
+      document.getElementById('logTerminal').scrollIntoView({ behavior: 'smooth' });
+    }
+
+    async function loadLogs(logType) {
+      currentLogType = logType;
+      document.querySelectorAll('.log-tab').forEach(btn => {
+        btn.className = 'log-tab px-3 py-1.5 rounded text-xs font-bold btn-outline-green';
+      });
+      const activeTab = document.getElementById('tab_' + logType);
+      if (activeTab) {
+        activeTab.className = 'log-tab px-3 py-1.5 rounded text-xs font-bold btn-green';
+      }
+
+      const serverId = document.getElementById('logServerSelect').value || 'all';
+      const lines = document.getElementById('logLinesSelect').value || 100;
+      const term = document.getElementById('logTerminal');
+      term.textContent = 'Loading logs... / جاري تحميل اللوجات...';
+
+      try {
+        const res = await fetch(`/api/logs?server_id=${encodeURIComponent(serverId)}&log_type=${encodeURIComponent(logType)}&lines=${lines}`);
+        const data = await res.json();
+        rawLogContent = data.content || '';
+        document.getElementById('logSourceInfo').textContent = `Source: ${data.source || 'SSH'} | Type: ${logType.toUpperCase()}`;
+        filterDisplayedLogs();
+      } catch (e) {
+        term.textContent = 'Error loading logs: ' + e;
+      }
+    }
+
+    function filterDisplayedLogs() {
+      const q = (document.getElementById('logSearchInput').value || '').trim().toLowerCase();
+      const term = document.getElementById('logTerminal');
+      if (!q) {
+        term.textContent = rawLogContent;
+        return;
+      }
+      const filtered = rawLogContent
+        .split('\n')
+        .filter(line => line.toLowerCase().includes(q))
+        .join('\n');
+      term.textContent = filtered || `No matching lines for "${q}"`;
+    }
+
+    function renderIncidents(incidents) {
+      const tbody = document.getElementById('incidentsBody');
+      if (!incidents.length) {
+        tbody.innerHTML = `<tr><td colspan="5" class="py-5 text-center text-green-700 font-semibold">No incidents or outages recorded / لا توجد انقطاعات مسجلة</td></tr>`;
+        return;
+      }
+      tbody.innerHTML = incidents.map(inc => {
+        const badge = inc.severity === 'CRITICAL'
+          ? '<span class="px-2 py-0.5 rounded bg-red-100 text-red-800 border border-red-300 text-xs font-bold">DOWN</span>'
+          : inc.severity === 'WARNING'
+          ? '<span class="px-2 py-0.5 rounded bg-amber-100 text-amber-800 border border-amber-300 text-xs font-bold">SPAM / WARN</span>'
+          : '<span class="px-2 py-0.5 rounded bg-green-100 text-green-800 border border-green-300 text-xs font-bold">RECOVERED</span>';
+        return `
+          <tr class="hover:bg-green-50/60">
+            <td class="py-2 px-3 text-xs font-mono text-green-800">${inc.created_at}</td>
+            <td class="py-2 px-3">${badge}</td>
+            <td class="py-2 px-3 font-bold text-green-900"><a href="/server/${inc.server_id}" class="hover:underline">${inc.server_name}</a> <span class="text-xs font-mono text-green-700">(${inc.server_ip})</span></td>
+            <td class="py-2 px-3 text-xs font-semibold text-green-800">${inc.service_name}</td>
+            <td class="py-2 px-3 text-xs text-green-900">${inc.details}</td>
+          </tr>
+        `;
+      }).join('');
+    }
+
+    function openAddServerModal() {
+      document.getElementById('srvId').value = '';
+      document.getElementById('srvName').value = '';
+      document.getElementById('srvIp').value = '';
+      document.getElementById('srvUser').value = 'root';
+      document.getElementById('srvPort').value = '22';
+      document.getElementById('srvPass').value = '';
+      document.getElementById('srvKey').value = '';
+      document.getElementById('srvQueueLimit').value = '100';
+      document.getElementById('srvSpamLimit').value = '20';
+      const m = document.getElementById('serverModal');
+      m.classList.remove('hidden');
+      m.classList.add('flex');
+    }
+
+    function openEditServerModal(id) {
+      const srv = cachedServers.find(s => s.id === id);
+      if (!srv) return;
+      document.getElementById('srvId').value = srv.id;
+      document.getElementById('srvName').value = srv.name;
+      document.getElementById('srvIp').value = srv.ip;
+      document.getElementById('srvUser').value = srv.ssh_user || 'root';
+      document.getElementById('srvPort').value = srv.ssh_port || 22;
+      document.getElementById('srvPass').value = '';
+      document.getElementById('srvKey').value = '';
+      document.getElementById('srvQueueLimit').value = srv.mail_queue_limit || 100;
+      document.getElementById('srvSpamLimit').value = srv.spam_threshold || 20;
+      const m = document.getElementById('serverModal');
+      m.classList.remove('hidden');
+      m.classList.add('flex');
+    }
+
+    function closeServerModal() {
+      const m = document.getElementById('serverModal');
+      m.classList.add('hidden');
+      m.classList.remove('flex');
+    }
+
+    async function saveServer(e) {
+      e.preventDefault();
+      const id = document.getElementById('srvId').value;
+      const passVal = document.getElementById('srvPass').value;
+      const keyVal = document.getElementById('srvKey').value;
+
+      const payload = {
+        name: document.getElementById('srvName').value,
+        ip: document.getElementById('srvIp').value,
+        ssh_user: document.getElementById('srvUser').value || 'root',
+        ssh_port: parseInt(document.getElementById('srvPort').value || '22', 10),
+        ssh_password: id && !passVal ? '__KEEP__' : passVal,
+        ssh_key: id && !keyVal ? '__KEEP__' : keyVal,
+        mail_queue_limit: parseInt(document.getElementById('srvQueueLimit').value || '100', 10),
+        spam_threshold: parseInt(document.getElementById('srvSpamLimit').value || '20', 10),
+      };
+
+      const url = id ? `/api/servers/${id}` : '/api/servers';
+      const method = id ? 'PUT' : 'POST';
+
+      await fetch(url, {
+        method,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      closeServerModal();
+      setTimeout(() => {
+        loadOverview();
+        loadLogs(currentLogType);
+      }, 600);
+    }
+
+    async function deleteServer(id, name) {
+      if (!confirm(`Delete server "${name}"?`)) return;
+      await fetch(`/api/servers/${id}`, { method: 'DELETE' });
+      loadOverview();
+    }
+
+    async function openSettingsModal() {
+      const res = await fetch('/api/settings');
+      const s = await res.json();
+      document.getElementById('tgEnabled').checked = s.telegram_enabled === '1';
+      document.getElementById('tgToken').value = s.telegram_bot_token || '';
+      document.getElementById('tgChatId').value = s.telegram_chat_id || '';
+      document.getElementById('slackEnabled').checked = s.slack_enabled === '1';
+      document.getElementById('slackWebhook').value = s.slack_webhook_url || '';
+      document.getElementById('chkInterval').value = s.check_interval_sec || '5';
+      document.getElementById('alertRecovery').checked = s.alert_on_recovery !== '0';
+      document.getElementById('alertSpam').checked = s.alert_on_spam !== '0';
+      document.getElementById('testAlertMsg').classList.add('hidden');
+
+      const m = document.getElementById('settingsModal');
+      m.classList.remove('hidden');
+      m.classList.add('flex');
+    }
+
+    function closeSettingsModal() {
+      const m = document.getElementById('settingsModal');
+      m.classList.add('hidden');
+      m.classList.remove('flex');
+    }
+
+    async function saveSettings(e) {
+      if (e) e.preventDefault();
+      const payload = {
+        telegram_enabled: document.getElementById('tgEnabled').checked ? '1' : '0',
+        telegram_bot_token: document.getElementById('tgToken').value,
+        telegram_chat_id: document.getElementById('tgChatId').value,
+        slack_enabled: document.getElementById('slackEnabled').checked ? '1' : '0',
+        slack_webhook_url: document.getElementById('slackWebhook').value,
+        check_interval_sec: String(document.getElementById('chkInterval').value || '5'),
+        alert_on_recovery: document.getElementById('alertRecovery').checked ? '1' : '0',
+        alert_on_spam: document.getElementById('alertSpam').checked ? '1' : '0',
+      };
+      await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      if (e) closeSettingsModal();
+    }
+
+    async function sendTestAlert() {
+      await saveSettings(null);
+      const box = document.getElementById('testAlertMsg');
+      box.classList.remove('hidden');
+      box.textContent = 'Sending test alert to Telegram & Slack...';
+
+      const res = await fetch('/api/settings/test-alert', { method: 'POST' });
+      const data = await res.json();
+      const tg = data.results?.telegram;
+      const sl = data.results?.slack;
+      box.textContent = `Telegram: ${tg === true ? 'Sent Successfully' : (tg || 'Disabled')} | Slack: ${sl === true ? 'Sent Successfully' : (sl || 'Disabled')}`;
+    }
+
+    applyLanguage();
+    loadOverview().then(() => loadLogs('mail'));
+    setInterval(loadOverview, 5000);
+  </script>
+</body>
+</html>
