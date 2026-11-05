@@ -1,0 +1,20 @@
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Local SQLite database (contains server credentials & tokens)
+monitor.db
+*.db
+*.sqlite3
+
+# Environment & IDE files
+.env
+.vscode/
+.idea/
+*.log

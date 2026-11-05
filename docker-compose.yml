@@ -1,0 +1,9 @@
+services:
+  server-monitor:
+    build: .
+    container_name: server-monitor
+    restart: always
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./monitor.db:/app/monitor.db
