@@ -196,6 +196,7 @@ async def check_and_update_single_server(
 
     extra_stats = {
         "وقت التشغيل (Uptime)": inspection["uptime_str"],
+        "لود السيرفر (Load Avg)": inspection.get("load_str") or f"CPU {inspection['cpu_usage']}%",
         "الاستجابة (Ping)": f"{inspection['ping_ms']} ms",
         "الرسائل المرسلة": str(mail_stats.get("sent_count", 0)),
         "طابور الإرسال (Queue)": str(mail_stats.get("queue_count", 0)),
@@ -797,6 +798,37 @@ async def api_save_settings(payload: SettingsPayload):
     conn.commit()
     conn.close()
     return {"ok": True}
+
+
+@app.post("/api/settings/detect-telegram-chat-id")
+async def api_detect_telegram_chat_id(request: Request):
+    import httpx
+
+    body = await request.json()
+    bot_token = (body.get("bot_token") or "").strip()
+    if not bot_token:
+        return {"ok": False, "message": "يرجى إدخال Bot Token أولاً"}
+
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"https://api.telegram.org/bot{bot_token}/getUpdates")
+            data = resp.json()
+            if not data.get("ok"):
+                return {"ok": False, "message": "التوكن غير صحيح (Invalid Bot Token)"}
+            results = data.get("result") or []
+            for item in reversed(results):
+                msg = item.get("message") or item.get("channel_post") or item.get("my_chat_member") or {}
+                chat = msg.get("chat") or {}
+                if chat.get("id"):
+                    chat_id = str(chat["id"])
+                    chat_title = chat.get("title") or chat.get("username") or chat.get("first_name") or ""
+                    return {"ok": True, "chat_id": chat_id, "chat_name": chat_title}
+            return {
+                "ok": False,
+                "message": "افتح البوت الجديد الذي أنشأته في تليجرام واضغط Start أو أرسل له أي كلمة ثم اضغط هنا مرة أخرى.",
+            }
+    except Exception as e:
+        return {"ok": False, "message": f"خطأ في الاتصال بتليجرام: {e}"}
 
 
 @app.post("/api/settings/test-alert")

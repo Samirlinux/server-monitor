@@ -1,8 +1,10 @@
 import asyncio
 import io
 import json
+import os
 import re
 import socket
+import subprocess
 import time
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
@@ -160,31 +162,17 @@ def _create_ssh_client(
     return client
 
 
-def _ssh_deep_inspect_sync(server: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Runs a single combined bash inspection command over SSH so it executes in <1 second:
-    - System uptime, load avg, CPU %, RAM %, Disk %
-    - Exact status of Apache/Nginx, MySQL/MariaDB/PostgreSQL, Postfix/Exim/Dovecot
-    - Mail statistics: Sent count, Bounced count, Deferred count, Rejected/Spam count, Queue size
-    - Top senders / spam script detection
-    """
-    client = _create_ssh_client(
-        ip=server["ip"],
-        ssh_port=server.get("ssh_port", 22),
-        ssh_user=server.get("ssh_user", "root"),
-        ssh_password=server.get("ssh_password"),
-        ssh_key=server.get("ssh_key"),
-        timeout=4.0,
-    )
-    try:
-        script = r"""
+INSPECTION_BASH_SCRIPT = r"""
 export LC_ALL=C
 echo "===UPTIME==="
 uptime -p 2>/dev/null || uptime
 cat /proc/uptime 2>/dev/null | awk '{print $1}'
 
+echo "===LOADAVG==="
+cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}'
+nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1
+
 echo "===RESOURCES==="
-# CPU usage from /proc/stat or top
 top -bn1 2>/dev/null | grep -E "Cpu\(s\)|%Cpu" | head -n1
 free -m 2>/dev/null | awk '/Mem:/ {printf "%d %d %.1f\n", $3, $2, ($3/$2)*100}'
 df -h / 2>/dev/null | awk 'NR==2 {print $3, $2, $5}'
@@ -266,7 +254,64 @@ else
     echo "AUTH_FAIL:0"
 fi
 """
-        stdin, stdout, stderr = client.exec_command(script, timeout=5)
+
+
+def _get_local_ips() -> set:
+    ips = {"127.0.0.1", "localhost", "::1"}
+    try:
+        hostname = socket.gethostname()
+        ips.add(hostname)
+        for info in socket.getaddrinfo(hostname, None):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["hostname", "-I"], timeout=1.5).decode("utf-8", errors="ignore")
+        for part in out.split():
+            ips.add(part.strip())
+    except Exception:
+        pass
+    try:
+        pub = subprocess.check_output(["curl", "-s", "--max-time", "2", "https://api.ipify.org"], timeout=2.5).decode("utf-8", errors="ignore").strip()
+        if pub:
+            ips.add(pub)
+    except Exception:
+        pass
+    return ips
+
+
+LOCAL_HOST_IPS = _get_local_ips()
+
+
+def is_local_server_ip(ip: str) -> bool:
+    return os.name != "nt" and ip.strip() in LOCAL_HOST_IPS
+
+
+def _local_deep_inspect_sync() -> Dict[str, Any]:
+    """Run inspection directly on the local Linux server without needing SSH."""
+    res = subprocess.run(
+        ["bash", "-c", INSPECTION_BASH_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return _parse_ssh_inspection_output(res.stdout)
+
+
+def _ssh_deep_inspect_sync(server: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Runs a single combined bash inspection command over SSH so it executes in <1 second.
+    """
+    client = _create_ssh_client(
+        ip=server["ip"],
+        ssh_port=server.get("ssh_port", 22),
+        ssh_user=server.get("ssh_user", "root"),
+        ssh_password=server.get("ssh_password"),
+        ssh_key=server.get("ssh_key"),
+        timeout=4.0,
+    )
+    try:
+        stdin, stdout, stderr = client.exec_command(INSPECTION_BASH_SCRIPT, timeout=5)
         raw_out = stdout.read().decode("utf-8", errors="ignore")
         return _parse_ssh_inspection_output(raw_out)
     finally:
@@ -291,8 +336,31 @@ def _parse_ssh_inspection_output(raw: str) -> Dict[str, Any]:
     if len(uptime_lines) > 1:
         try:
             uptime_seconds = float(uptime_lines[1])
+            days = int(uptime_seconds // 86400)
+            hours = int((uptime_seconds % 86400) // 3600)
+            mins = int((uptime_seconds % 3600) // 60)
+            if days > 0:
+                uptime_str = f"{days}d {hours}h {mins}m"
+            elif hours > 0:
+                uptime_str = f"{hours}h {mins}m"
+            else:
+                uptime_str = f"{mins}m"
         except ValueError:
             pass
+
+    # 1b. Load Average (1m, 5m, 15m)
+    load_lines = sections.get("LOADAVG", [])
+    load_str = "0.00 / 0.00 / 0.00"
+    cpu_cores = 1
+    if load_lines:
+        parts = load_lines[0].split()
+        if len(parts) >= 3:
+            load_str = f"{parts[0]} / {parts[1]} / {parts[2]}"
+        if len(load_lines) > 1:
+            try:
+                cpu_cores = max(1, int(load_lines[1].strip()))
+            except ValueError:
+                cpu_cores = 1
 
     # 2. Resources
     res_lines = sections.get("RESOURCES", [])
@@ -373,6 +441,8 @@ def _parse_ssh_inspection_output(raw: str) -> Dict[str, Any]:
         "ssh_connected": True,
         "uptime_str": uptime_str,
         "uptime_seconds": uptime_seconds,
+        "load_str": load_str,
+        "cpu_cores": cpu_cores,
         "cpu_usage": cpu_pct,
         "ram_usage": ram_pct,
         "ram_detail": ram_detail,
@@ -390,7 +460,7 @@ async def inspect_server(
 ) -> Dict[str, Any]:
     """
     Full inspection of a single server within the 5-second monitoring cycle.
-    Combines fast TCP port checks (Apache, DB, Mail, SSH) + optional SSH deep metrics + RBL spam check.
+    Combines fast TCP port checks (Apache, DB, Mail, SSH) + optional SSH/Local deep metrics + RBL spam check.
     """
     ip = server["ip"].strip()
     configured_ports = server.get("check_ports")
@@ -408,17 +478,18 @@ async def inspect_server(
         for item in configured_ports
     ]
 
-    # 2. If SSH credentials are provided, run SSH inspection in parallel
+    # 2. If SSH credentials are provided (or if this is the local host), run deep inspection in parallel
     has_ssh_creds = bool(
         (server.get("ssh_password") and server.get("ssh_password").strip())
         or (server.get("ssh_key") and server.get("ssh_key").strip())
     )
     loop = asyncio.get_running_loop()
-    ssh_future = (
-        loop.run_in_executor(None, _ssh_deep_inspect_sync, server)
-        if has_ssh_creds
-        else None
-    )
+    if has_ssh_creds:
+        ssh_future = loop.run_in_executor(None, _ssh_deep_inspect_sync, server)
+    elif is_local_server_ip(ip):
+        ssh_future = loop.run_in_executor(None, _local_deep_inspect_sync)
+    else:
+        ssh_future = None
 
     port_results = await asyncio.gather(*port_tasks, return_exceptions=True)
 
@@ -427,7 +498,13 @@ async def inspect_server(
         try:
             ssh_data = await asyncio.wait_for(ssh_future, timeout=4.5)
         except Exception as e:
-            ssh_data = {"ssh_connected": False, "ssh_error": str(e)}
+            if is_local_server_ip(ip):
+                try:
+                    ssh_data = await loop.run_in_executor(None, _local_deep_inspect_sync)
+                except Exception:
+                    ssh_data = {"ssh_connected": False, "ssh_error": str(e)}
+            else:
+                ssh_data = {"ssh_connected": False, "ssh_error": str(e)}
 
     # 3. Build unified services status list
     services_list: List[Dict[str, Any]] = []
@@ -554,6 +631,8 @@ async def inspect_server(
 
     mail_stats["has_spam_issue"] = len(spam_warnings) > 0
     mail_stats["spam_warnings"] = spam_warnings
+    mail_stats["load_str"] = ssh_data.get("load_str", "")
+    mail_stats["cpu_cores"] = ssh_data.get("cpu_cores", 0)
 
     overall_status = "UP" if any_port_up else "DOWN"
 
@@ -562,7 +641,9 @@ async def inspect_server(
         "ping_ms": avg_ping_ms,
         "ssh_connected": ssh_data.get("ssh_connected", False),
         "ssh_error": ssh_data.get("ssh_error", ""),
-        "uptime_str": ssh_data.get("uptime_str") or ("متصل (Ping/Port متاح)" if overall_status == "UP" else "غير متصل (DOWN)"),
+        "uptime_str": ssh_data.get("uptime_str") or ("Online (TCP Active)" if overall_status == "UP" else "Offline (DOWN)"),
+        "load_str": ssh_data.get("load_str", ""),
+        "cpu_cores": ssh_data.get("cpu_cores", 0),
         "cpu_usage": ssh_data.get("cpu_usage", 0.0),
         "ram_usage": ssh_data.get("ram_usage", 0.0),
         "ram_detail": ssh_data.get("ram_detail", ""),
@@ -578,12 +659,14 @@ async def inspect_server(
 def _fetch_remote_logs_sync(
     server: Dict[str, Any], log_type: str = "mail", lines: int = 120
 ) -> Dict[str, Any]:
-    """Fetch real-time logs over SSH for Mail, Apache/Web, Database, or System."""
+    """Fetch real-time logs over SSH (or locally if local host) for Mail, Apache/Web, Database, or System."""
     has_ssh = bool(
         (server.get("ssh_password") and server.get("ssh_password").strip())
         or (server.get("ssh_key") and server.get("ssh_key").strip())
     )
-    if not has_ssh:
+    is_local = is_local_server_ip(server["ip"])
+
+    if not has_ssh and not is_local:
         return {
             "ok": False,
             "source": "local_only",
@@ -599,7 +682,7 @@ def _fetch_remote_logs_sync(
         "mail": (
             f"for f in /var/log/mail.log /var/log/maillog /var/log/exim4/mainlog /var/log/exim_mainlog; do "
             f"if [ -r \"$f\" ]; then echo \"==> $f <==\"; tail -n {lines} \"$f\"; exit 0; fi; done; "
-            f"journalctl -u postfix -u exim4 -u dovecot --no-pager -n {lines} 2>/dev/null || echo 'لم يتم العثور على ملف لوج للبريد'"
+            f"journalctl -u postfix -u exim4 -u dovecot --no-pager -n {lines} 2>/dev/null || echo 'No mail logs found'"
         ),
         "apache": (
             f"for f in /var/log/apache2/error.log /var/log/httpd/error_log /var/log/nginx/error.log /var/log/apache2/access.log; do "
@@ -624,6 +707,15 @@ def _fetch_remote_logs_sync(
         ),
     }
     cmd = cmd_map.get(log_type, cmd_map["system"])
+
+    if not has_ssh and is_local:
+        res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=6)
+        out = (res.stdout + res.stderr).strip()
+        return {
+            "ok": True,
+            "source": f"Local Server ({server['ip']})",
+            "content": out or "No log entries found.",
+        }
 
     client = _create_ssh_client(
         ip=server["ip"],
@@ -736,12 +828,30 @@ async def send_alerts(
 
     results = {"telegram": None, "slack": None}
 
-    async with httpx.AsyncClient(timeout=4.0) as client:
+    async with httpx.AsyncClient(timeout=6.0) as client:
         # 1. Telegram Notification
-        if str(settings.get("telegram_enabled", "0")) == "1":
-            bot_token = (settings.get("telegram_bot_token") or "").strip()
-            chat_id = (settings.get("telegram_chat_id") or "").strip()
-            if bot_token and chat_id:
+        bot_token = (settings.get("telegram_bot_token") or "").strip()
+        if bot_token.lower().startswith("bot") and ":" in bot_token:
+            bot_token = bot_token[3:].strip()
+        chat_id = (settings.get("telegram_chat_id") or "").strip()
+        tg_enabled = str(settings.get("telegram_enabled", "0")) == "1" or bool(bot_token)
+
+        if tg_enabled and bot_token:
+            if not chat_id:
+                try:
+                    upd = await client.get(f"https://api.telegram.org/bot{bot_token}/getUpdates")
+                    for item in reversed(upd.json().get("result") or []):
+                        msg_obj = item.get("message") or item.get("channel_post") or {}
+                        cid = (msg_obj.get("chat") or {}).get("id")
+                        if cid:
+                            chat_id = str(cid)
+                            break
+                except Exception:
+                    pass
+
+            if not chat_id:
+                results["telegram"] = "Missing Chat ID (أرسل /start للبوت أو أدخل الـ Chat ID)"
+            else:
                 tg_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
                 try:
                     resp = await client.post(
@@ -752,21 +862,28 @@ async def send_alerts(
                             "parse_mode": "Markdown",
                         },
                     )
-                    results["telegram"] = resp.status_code == 200
+                    if resp.status_code == 200:
+                        results["telegram"] = True
+                    else:
+                        err_desc = resp.json().get("description", resp.text)
+                        results["telegram"] = f"Telegram Error ({resp.status_code}): {err_desc}"
                 except Exception as e:
-                    results["telegram"] = f"Error: {e}"
+                    results["telegram"] = f"Connection Error: {e}"
 
         # 2. Slack Notification
-        if str(settings.get("slack_enabled", "0")) == "1":
-            webhook_url = (settings.get("slack_webhook_url") or "").strip()
-            if webhook_url:
-                try:
-                    resp = await client.post(
-                        webhook_url,
-                        json={"text": message_text},
-                    )
-                    results["slack"] = resp.status_code in (200, 204)
-                except Exception as e:
-                    results["slack"] = f"Error: {e}"
+        webhook_url = (settings.get("slack_webhook_url") or "").strip()
+        slack_enabled = str(settings.get("slack_enabled", "0")) == "1" or bool(webhook_url)
+        if slack_enabled and webhook_url:
+            try:
+                resp = await client.post(
+                    webhook_url,
+                    json={"text": message_text},
+                )
+                if resp.status_code in (200, 204):
+                    results["slack"] = True
+                else:
+                    results["slack"] = f"Slack Error ({resp.status_code}): {resp.text[:80]}"
+            except Exception as e:
+                results["slack"] = f"Connection Error: {e}"
 
     return results

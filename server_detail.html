@@ -86,7 +86,15 @@
           <h2 id="txtUptimeTitle" class="text-base font-extrabold text-green-900">مؤشر الـ Uptime وسجل الاستجابة اللحظي (كل 5 ثوانٍ)</h2>
           <p id="uptimeSystemStr" class="text-xs text-green-700 mt-0.5 font-semibold">Uptime: Loading...</p>
         </div>
-        <div class="flex items-center gap-6 text-center">
+        <div class="flex flex-wrap items-center gap-6 text-center">
+          <div>
+            <div class="text-xs font-bold text-green-700">System Uptime</div>
+            <div id="sysUptimeBox" class="text-lg font-extrabold text-green-900 font-mono" dir="ltr">--</div>
+          </div>
+          <div>
+            <div class="text-xs font-bold text-green-700">Load Avg (1/5/15m)</div>
+            <div id="loadAvgBox" class="text-lg font-extrabold text-green-900 font-mono" dir="ltr">--</div>
+          </div>
           <div>
             <div id="lblUp24" class="text-xs font-bold text-green-700">Uptime (24h)</div>
             <div id="up24h" class="text-xl font-extrabold text-green-900">100%</div>
@@ -420,8 +428,14 @@
           : 'px-2.5 py-0.5 rounded text-xs font-bold bg-red-100 text-red-800 border border-red-300';
         statusEl.textContent = isUp ? t.online : t.offline;
 
+        const mailObj = d.mail_stats || {};
+        const loadStr = mailObj.load_str || (d.ssh_connected ? '0.00 / 0.00 / 0.00' : 'SSH Required');
+        const coresStr = mailObj.cpu_cores ? ` (${mailObj.cpu_cores}C)` : '';
+
         document.getElementById('lastCheckedAt').textContent = (d.last_checked || '');
-        document.getElementById('uptimeSystemStr').textContent = 'Uptime: ' + (d.uptime_str || '');
+        document.getElementById('uptimeSystemStr').textContent = `System Uptime: ${d.uptime_str || '--'} | Load Average: ${loadStr}${coresStr}`;
+        document.getElementById('sysUptimeBox').textContent = d.uptime_str || '--';
+        document.getElementById('loadAvgBox').textContent = loadStr + coresStr;
         document.getElementById('up24h').textContent = (d.uptime_24h ?? 100) + '%';
         document.getElementById('up7d').textContent = (d.uptime_7d ?? 100) + '%';
         document.getElementById('pingMs').textContent = (d.ping_ms || 0) + ' ms';
