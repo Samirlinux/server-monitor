@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__STATUS_TITLE__</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --text:#1f2933; --muted:#6b7785; --border:#e3e8ee;
+    --green:#16a34a; --amber:#f59e0b; --red:#dc2626; --gray:#cbd5e1;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{ --bg:#0f141a; --card:#171e26; --text:#e6edf3; --muted:#8b98a5; --border:#26303b; --gray:#2c3742; }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}
+  .wrap{max-width:900px;margin:0 auto;padding:24px 16px}
+  h1{font-size:22px;margin:0 0 16px}
+  .banner{padding:16px 18px;border-radius:10px;color:#fff;font-weight:600;margin-bottom:20px}
+  .banner.up{background:var(--green)} .banner.partial{background:var(--amber)} .banner.down{background:var(--red)}
+  .banner small{display:block;font-weight:400;opacity:.9;margin-top:4px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px}
+  .head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+  .name{font-weight:600;font-size:16px}
+  .badge{font-size:13px;padding:2px 10px;border-radius:999px;color:#fff}
+  .badge.UP{background:var(--green)} .badge.DOWN{background:var(--red)} .badge.UNKNOWN{background:var(--gray);color:var(--text)}
+  .bars{display:flex;gap:2px;margin:12px 0 6px;direction:ltr;height:32px}
+  .bar{flex:1;border-radius:2px;background:var(--gray);min-width:2px}
+  .bar.g{background:var(--green)} .bar.a{background:var(--amber)} .bar.r{background:var(--red)}
+  .axis{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);direction:ltr}
+  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:13px;color:var(--muted)}
+  .stats b{color:var(--text)}
+  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:20px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>__STATUS_TITLE__</h1>
+  <div id="banner" class="banner up">جاري التحميل...</div>
+  <div id="list"></div>
+  <div class="foot" id="foot"></div>
+</div>
+
+<script>
+const fmt = v => (v === null || v === undefined) ? '—' : v + '%';
+const cls = p => p === null ? '' : (p >= 99.9 ? 'g' : (p >= 95 ? 'a' : 'r'));
+
+function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+async function load(){
+  try{
+    const res = await fetch('/api/public-status', {cache:'no-store'});
+    const d = await res.json();
+
+    const b = document.getElementById('banner');
+    b.className = 'banner ' + d.overall;
+    const msg = {
+      up: 'كل السيرفرات تعمل بشكل طبيعي',
+      partial: 'بعض السيرفرات بها مشكلة',
+      down: 'كل السيرفرات متوقفة'
+    }[d.overall];
+    b.innerHTML = esc(msg) + '<small>' + d.up + ' يعمل — ' + d.down + ' متوقف — من أصل ' + d.total + '</small>';
+
+    document.getElementById('list').innerHTML = d.servers.map(s => {
+      const bars = s.bars.map(x =>
+        '<div class="bar ' + cls(x.pct) + '" title="' + esc(x.day) + ' — ' + (x.pct === null ? 'لا توجد بيانات' : x.pct + '%') + '"></div>'
+      ).join('');
+      return '<div class="card">' +
+        '<div class="head"><span class="name">' + esc(s.name) + '</span>' +
+        '<span class="badge ' + esc(s.status) + '">' + esc(s.status === 'UP' ? 'يعمل' : (s.status === 'DOWN' ? 'متوقف' : 'غير معروف')) + '</span></div>' +
+        '<div class="bars">' + bars + '</div>' +
+        '<div class="axis"><span>قبل 90 يوم</span><span>اليوم</span></div>' +
+        '<div class="stats">' +
+          '<span>24 ساعة: <b>' + fmt(s.uptime_24h) + '</b></span>' +
+          '<span>7 أيام: <b>' + fmt(s.uptime_7d) + '</b></span>' +
+          '<span>30 يوم: <b>' + fmt(s.uptime_30d) + '</b></span>' +
+          '<span>90 يوم: <b>' + fmt(s.uptime_90d) + '</b></span>' +
+        '</div></div>';
+    }).join('') || '<div class="card">لا توجد سيرفرات مضافة بعد.</div>';
+
+    document.getElementById('foot').textContent = 'آخر تحديث: ' + d.generated;
+  }catch(e){
+    document.getElementById('foot').textContent = 'تعذر تحميل البيانات، جاري إعادة المحاولة...';
+  }
+}
+load();
+setInterval(load, 30000);
+</script>
+</body>
+</html>

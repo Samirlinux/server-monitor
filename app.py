@@ -11,6 +11,7 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+import extras
 from monitor_engine import (
     DEFAULT_SERVICE_PORTS,
     execute_service_action,
@@ -194,9 +195,17 @@ async def check_and_update_single_server(
     rbl_status = inspection["rbl_status"]
     settings = get_settings_dict()
 
+    ram_info = f"{inspection['ram_usage']}%" + (f" ({inspection['ram_detail']})" if inspection.get("ram_detail") else "")
+    disk_info = f"{inspection['disk_usage']}%" + (f" ({inspection['disk_detail']})" if inspection.get("disk_detail") else "")
+    load_info = inspection.get("load_str") or f"CPU {inspection['cpu_usage']}%"
+    if inspection.get("cpu_cores"):
+        load_info += f" ({inspection['cpu_cores']} Cores)"
+
     extra_stats = {
         "وقت التشغيل (Uptime)": inspection["uptime_str"],
-        "لود السيرفر (Load Avg)": inspection.get("load_str") or f"CPU {inspection['cpu_usage']}%",
+        "لود السيرفر (Load Avg)": f"{load_info} | CPU: {inspection['cpu_usage']}%",
+        "استهلاك الرام (RAM)": ram_info,
+        "مساحة السيرفر (Disk)": disk_info,
         "الاستجابة (Ping)": f"{inspection['ping_ms']} ms",
         "الرسائل المرسلة": str(mail_stats.get("sent_count", 0)),
         "طابور الإرسال (Queue)": str(mail_stats.get("queue_count", 0)),
@@ -368,12 +377,19 @@ async def monitor_loop() -> None:
         await asyncio.sleep(sleep_for)
 
 
+extras_start = None  # بيتعبّى بعد إنشاء app (الأسطر تحت)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     init_db()
     task = asyncio.create_task(monitor_loop())
+    # تقرير كل ساعة + تجميع الـ uptime اليومي لصفحة /status
+    extra_tasks = [asyncio.create_task(c) for c in extras_start()]
     yield
     task.cancel()
+    for t in extra_tasks:
+        t.cancel()
 
 
 app = FastAPI(
@@ -381,6 +397,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# يسجّل: /status  و  /api/public-status  و  POST /api/reports/send-now
+extras_start = extras.register(app, get_db, get_settings_dict, BASE_DIR)
 
 
 # ─── Pydantic Payloads ───────────────────────────────────────────────────────
@@ -671,6 +690,10 @@ async def api_delete_server(server_id: int):
     conn.execute("DELETE FROM server_state WHERE server_id = ?", (server_id,))
     conn.execute("DELETE FROM uptime_checks WHERE server_id = ?", (server_id,))
     conn.execute("DELETE FROM incidents_logs WHERE server_id = ?", (server_id,))
+    try:
+        conn.execute("DELETE FROM uptime_daily WHERE server_id = ?", (server_id,))
+    except sqlite3.OperationalError:
+        pass
     conn.commit()
     conn.close()
     return {"ok": True}
@@ -841,9 +864,10 @@ async def api_test_alert():
         server_ip="127.0.0.1",
         severity="RECOVERY",
         service_name="Apache / MySQL / Mail / Uptime Monitor",
-        details="تم ربط التنبيهات بنجاح! سيصلك تنبيه فوري خلال 5 ثوانٍ عند توقف أي سيرفر أو خدمة أو وجود سبام.",
+        details="تم ربط التنبيهات بنجاح! سيصلك تنبيه فوري خلال 5 ثوانٍ عند توقف أي سيرفر أو خدمة أو وجود سبام، بالإضافة إلى تقرير شامل كل ساعة.",
         extra_stats={
             "فترة الفحص التلقائي": f"كل {settings.get('check_interval_sec', '5')} ثوانٍ",
+            "التقرير الدوري": "كل ساعة (Load / RAM / Disk / Uptime)",
             "حالة النظام": "يعمل بكفاءة 100%",
         },
     )
