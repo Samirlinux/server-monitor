@@ -8,13 +8,18 @@ extras.py  —  إضافات لمشروع server-monitor
 import asyncio
 import json
 import os
+import time
 from datetime import datetime, timedelta
 
 import httpx
+from fastapi import Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 REPORT_EVERY_SEC = int(os.getenv("REPORT_EVERY_SEC", "3600"))  # كل ساعة
-REPORTS_ENABLED = os.getenv("HOURLY_REPORTS", "1") == "1"
+REPORTS_ENABLED = os.getenv("HOURLY_REPORTS", "0") == "1"   # التقرير الدوري مقفول افتراضياً
+DISK_ALERT_PCT = float(os.getenv("DISK_ALERT_PCT", "90"))    # تنبيه لو الهارد وصل الحد ده
+RAM_ALERT_PCT = float(os.getenv("RAM_ALERT_PCT", "90"))      # تنبيه لو الرام وصلت الحد ده
+ALERT_REPEAT_SEC = int(os.getenv("ALERT_REPEAT_SEC", "21600"))  # ما يكررش نفس التنبيه قبل 6 ساعات
 STATUS_TITLE = os.getenv("STATUS_TITLE", "حالة السيرفرات")
 
 
@@ -33,6 +38,9 @@ def register(app, get_db, get_settings_dict, base_dir):
                    PRIMARY KEY (server_id, day)
                )"""
         )
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(servers)").fetchall()]
+        if "public_visible" not in cols:
+            conn.execute("ALTER TABLE servers ADD COLUMN public_visible INTEGER DEFAULT 1")
         conn.commit()
         conn.close()
 
@@ -77,6 +85,7 @@ def register(app, get_db, get_settings_dict, base_dir):
         servers = conn.execute(
             """SELECT s.id, s.name, st.status, st.uptime_24h, st.ping_ms, st.last_checked
                FROM servers s LEFT JOIN server_state st ON s.id = st.server_id
+               WHERE COALESCE(s.public_visible, 1) = 1
                ORDER BY s.name COLLATE NOCASE"""
         ).fetchall()
         since = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
@@ -135,6 +144,90 @@ def register(app, get_db, get_settings_dict, base_dir):
                 "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             }
         )
+
+    # ───────────────────────── التحكم في السيرفرات الظاهرة ─────────────────────────
+    ADMIN_HTML = """<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Status visibility</title>
+<style>body{font-family:system-ui,Tahoma,sans-serif;background:#f5f7fa;color:#1f2933;margin:0}
+.w{max-width:700px;margin:0 auto;padding:24px 16px}.c{background:#fff;border:1px solid #e3e8ee;border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+small{color:#6b7785;display:block}label{display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap}
+input{width:20px;height:20px}a{color:#16a34a}</style></head><body><div class="w">
+<h2>إظهار / إخفاء السيرفرات في صفحة الحالة &middot; Show / hide on status page</h2>
+<p><a href="/status">/status</a> &middot; <a href="/">Dashboard</a></p><div id="l">...</div></div>
+<script>
+async function load(){const r=await fetch('/api/status-visibility');const d=await r.json();
+document.getElementById('l').innerHTML=d.map(s=>'<div class="c"><div><b>'+esc(s.name)+'</b><small>'+esc(s.ip)+'</small></div>'+
+'<label><input type="checkbox" '+(s.public_visible?'checked':'')+' onchange="tog('+s.id+',this.checked)"> ظاهر / Visible</label></div>').join('')||'No servers';}
+function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
+async function tog(id,v){await fetch('/api/status-visibility',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,visible:v})});}
+load();</script></body></html>"""
+
+    @app.get("/status-settings", response_class=HTMLResponse)
+    async def status_settings_page():
+        return HTMLResponse(ADMIN_HTML)
+
+    @app.get("/api/status-visibility")
+    def status_visibility_list():
+        conn = get_db()
+        rows = conn.execute(
+            "SELECT id, name, ip, COALESCE(public_visible, 1) AS public_visible FROM servers ORDER BY name COLLATE NOCASE"
+        ).fetchall()
+        conn.close()
+        return [dict(r) for r in rows]
+
+    @app.post("/api/status-visibility")
+    async def status_visibility_set(request: Request):
+        body = await request.json()
+        conn = get_db()
+        conn.execute(
+            "UPDATE servers SET public_visible = ? WHERE id = ?",
+            (1 if body.get("visible") else 0, int(body.get("id"))),
+        )
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    # ───────────────────────── تنبيهات الهارد والرام (فقط عند تجاوز الحد) ─────────────────────────
+    _last_alert = {}
+
+    async def check_thresholds():
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT s.id, s.name, s.ip, st.*
+               FROM servers s JOIN server_state st ON s.id = st.server_id"""
+        ).fetchall()
+        conn.close()
+        settings = get_settings_dict()
+        now = time.time()
+        for row in rows:
+            if not row["ssh_connected"] or row["status"] != "UP":
+                continue
+            for key, label, val, limit, detail in (
+                ("disk", "💽 مساحة الهارد / Disk", row["disk_usage"], DISK_ALERT_PCT, row["disk_detail"]),
+                ("ram", "🧠 الرام / RAM", row["ram_usage"], RAM_ALERT_PCT, row["ram_detail"]),
+            ):
+                k = (row["id"], key)
+                if (val or 0) >= limit:
+                    if now - _last_alert.get(k, 0) >= ALERT_REPEAT_SEC:
+                        _last_alert[k] = now
+                        text = (
+                            f"⚠️ تحذير: {label} وصل {val}%\n"
+                            f"🖥 السيرفر: {row['name']} ({row['ip']})\n"
+                            f"📊 التفاصيل: {detail or '-'}\n"
+                            f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        await send_text(settings, text)
+                else:
+                    _last_alert.pop(k, None)  # رجع طبيعي، لو عدّى الحد تاني يبعت من جديد
+
+    async def threshold_loop():
+        await asyncio.sleep(90)
+        while True:
+            try:
+                await check_thresholds()
+            except Exception as e:
+                print(f"[threshold_loop] {e}")
+            await asyncio.sleep(60)
 
     # ───────────────────────── التقرير كل ساعة ─────────────────────────
     async def send_text(settings, text):
@@ -233,7 +326,7 @@ def register(app, get_db, get_settings_dict, base_dir):
 
     def start():
         init_tables()
-        coros = [aggregate_loop()]
+        coros = [aggregate_loop(), threshold_loop()]
         if REPORTS_ENABLED:
             coros.append(report_loop())
         return coros

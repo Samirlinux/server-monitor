@@ -15,7 +15,11 @@
   *{box-sizing:border-box}
   body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}
   .wrap{max-width:900px;margin:0 auto;padding:24px 16px}
-  h1{font-size:22px;margin:0 0 16px}
+  .top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:16px}
+  h1{font-size:22px;margin:0}
+  .lang{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
+  .lang button{border:0;background:var(--card);color:var(--text);padding:6px 14px;cursor:pointer;font-size:13px}
+  .lang button.on{background:var(--green);color:#fff}
   .banner{padding:16px 18px;border-radius:10px;color:#fff;font-weight:600;margin-bottom:20px}
   .banner.up{background:var(--green)} .banner.partial{background:var(--amber)} .banner.down{background:var(--red)}
   .banner small{display:block;font-weight:400;opacity:.9;margin-top:4px}
@@ -35,54 +39,113 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>__STATUS_TITLE__</h1>
-  <div id="banner" class="banner up">جاري التحميل...</div>
+  <div class="top">
+    <h1>__STATUS_TITLE__</h1>
+    <div class="lang">
+      <button id="btn-ar" onclick="setLang('ar')">العربية</button>
+      <button id="btn-en" onclick="setLang('en')">English</button>
+    </div>
+  </div>
+  <div id="banner" class="banner up">...</div>
   <div id="list"></div>
   <div class="foot" id="foot"></div>
 </div>
 
 <script>
+const I18N = {
+  ar: {
+    up_all: 'كل السيرفرات تعمل بشكل طبيعي',
+    partial: 'بعض السيرفرات بها مشكلة',
+    down_all: 'كل السيرفرات متوقفة',
+    counts: (u, d, t) => u + ' يعمل — ' + d + ' متوقف — من أصل ' + t,
+    UP: 'يعمل', DOWN: 'متوقف', UNKNOWN: 'غير معروف',
+    d90: 'قبل 90 يوم', today: 'اليوم',
+    h24: '24 ساعة', d7: '7 أيام', d30: '30 يوم', d90s: '90 يوم',
+    nodata: 'لا توجد بيانات',
+    empty: 'لا توجد سيرفرات معروضة.',
+    updated: 'آخر تحديث: ',
+    err: 'تعذر تحميل البيانات، جاري إعادة المحاولة...'
+  },
+  en: {
+    up_all: 'All systems operational',
+    partial: 'Some systems are having issues',
+    down_all: 'All systems are down',
+    counts: (u, d, t) => u + ' up — ' + d + ' down — ' + t + ' total',
+    UP: 'Operational', DOWN: 'Down', UNKNOWN: 'Unknown',
+    d90: '90 days ago', today: 'Today',
+    h24: '24 hours', d7: '7 days', d30: '30 days', d90s: '90 days',
+    nodata: 'No data',
+    empty: 'No servers to show.',
+    updated: 'Last updated: ',
+    err: 'Could not load data, retrying...'
+  }
+};
+
+let lang = 'ar';
+try {
+  const q = new URLSearchParams(location.search).get('lang');
+  lang = q || localStorage.getItem('status_lang') || ((navigator.language || '').toLowerCase().startsWith('ar') ? 'ar' : 'en');
+} catch (e) {}
+if (!I18N[lang]) lang = 'ar';
+
 const fmt = v => (v === null || v === undefined) ? '—' : v + '%';
 const cls = p => p === null ? '' : (p >= 99.9 ? 'g' : (p >= 95 ? 'a' : 'r'));
-
 function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+
+let lastData = null;
+
+function setLang(l){
+  lang = l;
+  try { localStorage.setItem('status_lang', l); } catch (e) {}
+  applyLang();
+  if (lastData) render(lastData);
+}
+
+function applyLang(){
+  document.documentElement.lang = lang;
+  document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
+  document.getElementById('btn-ar').className = lang === 'ar' ? 'on' : '';
+  document.getElementById('btn-en').className = lang === 'en' ? 'on' : '';
+}
+
+function render(d){
+  const t = I18N[lang];
+  const b = document.getElementById('banner');
+  b.className = 'banner ' + d.overall;
+  const msg = d.overall === 'up' ? t.up_all : (d.overall === 'partial' ? t.partial : t.down_all);
+  b.innerHTML = esc(msg) + '<small>' + esc(t.counts(d.up, d.down, d.total)) + '</small>';
+
+  document.getElementById('list').innerHTML = d.servers.map(s => {
+    const bars = s.bars.map(x =>
+      '<div class="bar ' + cls(x.pct) + '" title="' + esc(x.day) + ' — ' + (x.pct === null ? esc(t.nodata) : x.pct + '%') + '"></div>'
+    ).join('');
+    return '<div class="card">' +
+      '<div class="head"><span class="name">' + esc(s.name) + '</span>' +
+      '<span class="badge ' + esc(s.status) + '">' + esc(t[s.status] || t.UNKNOWN) + '</span></div>' +
+      '<div class="bars">' + bars + '</div>' +
+      '<div class="axis"><span>' + esc(t.d90) + '</span><span>' + esc(t.today) + '</span></div>' +
+      '<div class="stats">' +
+        '<span>' + esc(t.h24) + ': <b>' + fmt(s.uptime_24h) + '</b></span>' +
+        '<span>' + esc(t.d7) + ': <b>' + fmt(s.uptime_7d) + '</b></span>' +
+        '<span>' + esc(t.d30) + ': <b>' + fmt(s.uptime_30d) + '</b></span>' +
+        '<span>' + esc(t.d90s) + ': <b>' + fmt(s.uptime_90d) + '</b></span>' +
+      '</div></div>';
+  }).join('') || '<div class="card">' + esc(t.empty) + '</div>';
+
+  document.getElementById('foot').textContent = t.updated + d.generated;
+}
 
 async function load(){
   try{
     const res = await fetch('/api/public-status', {cache:'no-store'});
-    const d = await res.json();
-
-    const b = document.getElementById('banner');
-    b.className = 'banner ' + d.overall;
-    const msg = {
-      up: 'كل السيرفرات تعمل بشكل طبيعي',
-      partial: 'بعض السيرفرات بها مشكلة',
-      down: 'كل السيرفرات متوقفة'
-    }[d.overall];
-    b.innerHTML = esc(msg) + '<small>' + d.up + ' يعمل — ' + d.down + ' متوقف — من أصل ' + d.total + '</small>';
-
-    document.getElementById('list').innerHTML = d.servers.map(s => {
-      const bars = s.bars.map(x =>
-        '<div class="bar ' + cls(x.pct) + '" title="' + esc(x.day) + ' — ' + (x.pct === null ? 'لا توجد بيانات' : x.pct + '%') + '"></div>'
-      ).join('');
-      return '<div class="card">' +
-        '<div class="head"><span class="name">' + esc(s.name) + '</span>' +
-        '<span class="badge ' + esc(s.status) + '">' + esc(s.status === 'UP' ? 'يعمل' : (s.status === 'DOWN' ? 'متوقف' : 'غير معروف')) + '</span></div>' +
-        '<div class="bars">' + bars + '</div>' +
-        '<div class="axis"><span>قبل 90 يوم</span><span>اليوم</span></div>' +
-        '<div class="stats">' +
-          '<span>24 ساعة: <b>' + fmt(s.uptime_24h) + '</b></span>' +
-          '<span>7 أيام: <b>' + fmt(s.uptime_7d) + '</b></span>' +
-          '<span>30 يوم: <b>' + fmt(s.uptime_30d) + '</b></span>' +
-          '<span>90 يوم: <b>' + fmt(s.uptime_90d) + '</b></span>' +
-        '</div></div>';
-    }).join('') || '<div class="card">لا توجد سيرفرات مضافة بعد.</div>';
-
-    document.getElementById('foot').textContent = 'آخر تحديث: ' + d.generated;
+    lastData = await res.json();
+    render(lastData);
   }catch(e){
-    document.getElementById('foot').textContent = 'تعذر تحميل البيانات، جاري إعادة المحاولة...';
+    document.getElementById('foot').textContent = I18N[lang].err;
   }
 }
+
+applyLang();
 load();
 setInterval(load, 30000);
 </script>

@@ -153,6 +153,19 @@ def record_incident(
 # Track RBL scan cycles & spam alert cooldowns in memory
 _cycle_counter = 0
 _spam_alert_cooldown: Dict[int, float] = {}
+_svc_alert_cooldown: Dict[tuple, float] = {}  # (server_id, service) -> آخر تنبيه
+
+# الخدمات الوحيدة اللي تبعت تنبيهات (الباقي بيظهر في اللوحة بس). تقدر تغيّرها بالمتغير ALERT_SERVICES
+ALERT_SERVICE_KEYWORDS = [
+    k.strip().lower()
+    for k in os.getenv("ALERT_SERVICES", "apache,httpd,mysql,maria").split(",")
+    if k.strip()
+]
+
+
+def _is_alert_service(svc: Dict[str, Any]) -> bool:
+    text = f"{svc.get('key', '')} {svc.get('name', '')}".lower()
+    return any(k in text for k in ALERT_SERVICE_KEYWORDS)
 
 
 async def check_and_update_single_server(
@@ -231,6 +244,8 @@ async def check_and_update_single_server(
     # 2. Detect individual service transitions (Apache, MySQL, Mail, systemd services)
     if new_status == "UP":
         for svc in new_services:
+            if not _is_alert_service(svc):
+                continue  # مش Apache ولا قاعدة بيانات: ما نبعتش تنبيه
             s_key = svc["key"]
             s_name = svc["name"]
             s_status = svc["status"]
@@ -241,9 +256,13 @@ async def check_and_update_single_server(
                 title = f"توقف خدمة: {s_name}"
                 details = f"فصلت خدمة {s_name} على السيرفر {server_name} — ({svc.get('detail', '')})"
                 record_incident(server_id, server_name, server_ip, "CRITICAL", s_name, title, details)
-                await send_alerts(
-                    settings, title, server_name, server_ip, "CRITICAL", s_name, details, extra_stats
-                )
+                # نفس الخدمة على نفس السيرفر: تنبيه واحد كل 30 دقيقة بحد أقصى (يمنع الإزعاج لو الخدمة بتقع وتقوم)
+                _now_ts = datetime.now().timestamp()
+                if _now_ts - _svc_alert_cooldown.get((server_id, s_key), 0) > 1800:
+                    _svc_alert_cooldown[(server_id, s_key)] = _now_ts
+                    await send_alerts(
+                        settings, title, server_name, server_ip, "CRITICAL", s_name, details, extra_stats
+                    )
             elif old_s_status == "DOWN" and s_status == "UP":
                 title = f"عودة خدمة للعمل: {s_name}"
                 details = f"عادت خدمة {s_name} للعمل بنجاح ({svc.get('detail', '')})"
