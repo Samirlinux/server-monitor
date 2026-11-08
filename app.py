@@ -12,6 +12,7 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
 import extras
+import tasks as tasks_page
 from monitor_engine import (
     DEFAULT_SERVICE_PORTS,
     execute_service_action,
@@ -419,6 +420,9 @@ app = FastAPI(
 
 # يسجّل: /status  و  /api/public-status  و  POST /api/reports/send-now
 extras_start = extras.register(app, get_db, get_settings_dict, BASE_DIR)
+
+# صفحة التاسكات المستقلة: /tasks
+tasks_page.register(app, get_db)
 
 
 # ─── Pydantic Payloads ───────────────────────────────────────────────────────
