@@ -110,12 +110,23 @@ def init_db() -> None:
         "telegram_chat_id": "",
         "slack_enabled": "0",
         "slack_webhook_url": "",
-        "check_interval_sec": "5",
+        "check_interval_sec": "20",
         "alert_on_recovery": "1",
         "alert_on_spam": "1",
     }
     for k, v in default_settings.items():
         cur.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (k, v))
+
+    # مرة واحدة بس: لو الفحص كان أسرع من 20 ثانية خليه 20
+    if not cur.execute("SELECT 1 FROM settings WHERE key = 'interval_migrated_20'").fetchone():
+        row = cur.execute("SELECT value FROM settings WHERE key = 'check_interval_sec'").fetchone()
+        try:
+            cur_val = int(row[0]) if row else 20
+        except (TypeError, ValueError):
+            cur_val = 20
+        if cur_val < 20:
+            cur.execute("UPDATE settings SET value = '20' WHERE key = 'check_interval_sec'")
+        cur.execute("INSERT OR REPLACE INTO settings (key, value) VALUES ('interval_migrated_20', '1')")
 
     conn.commit()
     conn.close()
@@ -156,17 +167,6 @@ _cycle_counter = 0
 _spam_alert_cooldown: Dict[int, float] = {}
 _svc_alert_cooldown: Dict[tuple, float] = {}  # (server_id, service) -> آخر تنبيه
 
-# الخدمات الوحيدة اللي تبعت تنبيهات (الباقي بيظهر في اللوحة بس). تقدر تغيّرها بالمتغير ALERT_SERVICES
-ALERT_SERVICE_KEYWORDS = [
-    k.strip().lower()
-    for k in os.getenv("ALERT_SERVICES", "apache,httpd,mysql,maria").split(",")
-    if k.strip()
-]
-
-
-def _is_alert_service(svc: Dict[str, Any]) -> bool:
-    text = f"{svc.get('key', '')} {svc.get('name', '')}".lower()
-    return any(k in text for k in ALERT_SERVICE_KEYWORDS)
 
 
 async def check_and_update_single_server(
@@ -208,6 +208,7 @@ async def check_and_update_single_server(
     mail_stats = inspection["mail_stats"]
     rbl_status = inspection["rbl_status"]
     settings = get_settings_dict()
+    svc_prefs = extras.parse_prefs(settings)
 
     ram_info = f"{inspection['ram_usage']}%" + (f" ({inspection['ram_detail']})" if inspection.get("ram_detail") else "")
     disk_info = f"{inspection['disk_usage']}%" + (f" ({inspection['disk_detail']})" if inspection.get("disk_detail") else "")
@@ -245,8 +246,8 @@ async def check_and_update_single_server(
     # 2. Detect individual service transitions (Apache, MySQL, Mail, systemd services)
     if new_status == "UP":
         for svc in new_services:
-            if not _is_alert_service(svc):
-                continue  # مش Apache ولا قاعدة بيانات: ما نبعتش تنبيه
+            if not extras.svc_alert_enabled(svc, svc_prefs):
+                continue  # الخدمة دي مقفول عليها التنبيه (أو مخفية) من لوحة الإعدادات
             s_key = svc["key"]
             s_name = svc["name"]
             s_status = svc["status"]
@@ -388,9 +389,9 @@ async def monitor_loop() -> None:
 
         settings = get_settings_dict()
         try:
-            interval = max(3, int(settings.get("check_interval_sec", "5")))
+            interval = max(3, int(settings.get("check_interval_sec", "20")))
         except ValueError:
-            interval = 5
+            interval = 20
 
         elapsed = asyncio.get_running_loop().time() - loop_start
         sleep_for = max(0.5, interval - elapsed)
@@ -450,7 +451,7 @@ class SettingsPayload(BaseModel):
     telegram_chat_id: str = ""
     slack_enabled: str = "0"
     slack_webhook_url: str = ""
-    check_interval_sec: str = "5"
+    check_interval_sec: str = "20"
     alert_on_recovery: str = "1"
     alert_on_spam: str = "1"
 
@@ -508,6 +509,7 @@ async def api_overview():
     ]
     conn.close()
 
+    _svc_prefs = extras.parse_prefs(get_settings_dict())
     servers_out = []
     total_sent_emails = 0
     total_spam_alerts = 0
@@ -516,7 +518,7 @@ async def api_overview():
 
     for r in rows:
         d = dict(r)
-        d["services"] = json.loads(d.pop("services_json") or "[]")
+        d["services"] = [s for s in json.loads(d.pop("services_json") or "[]") if extras.svc_visible(s, _svc_prefs)]
         d["mail_stats"] = json.loads(d.pop("mail_stats_json") or "{}")
         d["rbl_status"] = json.loads(d.pop("rbl_status_json") or "{}")
 
@@ -615,7 +617,8 @@ async def api_server_detail(server_id: int):
     conn.close()
 
     data = dict(row)
-    data["services"] = json.loads(data.pop("services_json") or "[]")
+    _svc_prefs = extras.parse_prefs(get_settings_dict())
+    data["services"] = [s for s in json.loads(data.pop("services_json") or "[]") if extras.svc_visible(s, _svc_prefs)]
     data["mail_stats"] = json.loads(data.pop("mail_stats_json") or "{}")
     data["rbl_status"] = json.loads(data.pop("rbl_status_json") or "{}")
     data["uptime_7d"] = uptime_7d
@@ -894,7 +897,7 @@ async def api_test_alert():
         service_name="Apache / MySQL / Mail / Uptime Monitor",
         details="تم ربط التنبيهات بنجاح! سيصلك تنبيه فوري خلال 5 ثوانٍ عند توقف أي سيرفر أو خدمة أو وجود سبام، بالإضافة إلى تقرير شامل كل ساعة.",
         extra_stats={
-            "فترة الفحص التلقائي": f"كل {settings.get('check_interval_sec', '5')} ثوانٍ",
+            "فترة الفحص التلقائي": f"كل {settings.get('check_interval_sec', '20')} ثوانٍ",
             "التقرير الدوري": "كل ساعة (Load / RAM / Disk / Uptime)",
             "حالة النظام": "يعمل بكفاءة 100%",
         },

@@ -23,48 +23,158 @@ ALERT_REPEAT_SEC = int(os.getenv("ALERT_REPEAT_SEC", "21600"))  # ما يكرر�
 STATUS_TITLE = os.getenv("STATUS_TITLE", "حالة السيرفرات")
 
 
-# ───────────────────────── ودجت لوحة المراقبة (بيتحقن في الصفحة الرئيسية) ─────────────────────────
-DASHBOARD_WIDGET = """
-<div id="sx-root" dir="rtl" style="position:fixed;bottom:16px;left:16px;z-index:99999;font-family:system-ui,Tahoma,sans-serif;font-size:14px">
-  <button id="sx-btn" style="background:#2563eb;color:#fff;border:0;border-radius:999px;padding:10px 16px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3);font:inherit">👁 صفحة الحالة / التاسكات</button>
-  <div id="sx-panel" style="display:none;position:absolute;bottom:48px;left:0;width:340px;max-width:92vw;max-height:70vh;overflow:auto;background:#fff;color:#1f2933;border:1px solid #cbd5e1;border-radius:12px;padding:14px;box-shadow:0 6px 24px rgba(0,0,0,.3)">
-    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
-      <a href="/status" target="_blank" style="color:#2563eb">🌐 صفحة الاب تايم</a>
-      <a href="/tasks" target="_blank" style="color:#2563eb">📋 التاسكات</a>
-      <a href="/tasks/report" target="_blank" style="color:#2563eb">📊 تقرير الشركات</a>
-    </div>
-    <div style="font-weight:600;margin-bottom:6px">السيرفرات الظاهرة في صفحة الاب تايم</div>
-    <div style="color:#6b7785;font-size:12px;margin-bottom:8px">شيل العلامة لإخفاء السيرفر من الصفحة العامة (بيفضل متراقب وبيبعت تنبيهات).</div>
-    <div id="sx-list">...</div>
+# ───────────────────────── تفضيلات الخدمات (إظهار في اللوحة / تنبيه) ─────────────────────────
+DEFAULT_ALERT_KEYWORDS = [
+    k.strip().lower()
+    for k in os.getenv("ALERT_SERVICES", "apache,httpd,mysql,maria").split(",")
+    if k.strip()
+]
+
+
+def parse_prefs(settings):
+    """بيرجّع {service_key: {"show": bool, "alert": bool}} من جدول الإعدادات."""
+    try:
+        p = json.loads(settings.get("service_prefs") or "{}")
+        return p if isinstance(p, dict) else {}
+    except Exception:
+        return {}
+
+
+def svc_visible(svc, prefs):
+    p = prefs.get(str(svc.get("key", "")))
+    if isinstance(p, dict) and "show" in p:
+        return bool(p["show"])
+    return True
+
+
+def svc_alert_enabled(svc, prefs):
+    """الخدمة المخفية ما بتبعتش تنبيه. لو ما اتحددش اختيار: Apache وقواعد البيانات بس."""
+    if not svc_visible(svc, prefs):
+        return False
+    p = prefs.get(str(svc.get("key", "")))
+    if isinstance(p, dict) and "alert" in p:
+        return bool(p["alert"])
+    text = f"{svc.get('key', '')} {svc.get('name', '')}".lower()
+    return any(k in text for k in DEFAULT_ALERT_KEYWORDS)
+
+
+# ───────────────────────── لوحة الإعدادات (ودجت داخل اللوحة + صفحة /status-settings) ─────────────────────────
+PANEL_INNER = r"""
+<div id="sx-body" style="font-size:14px;color:#1f2933">
+  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
+    <a href="/status" target="_blank" style="color:#2563eb">🌐 صفحة الاب تايم</a>
+    <a href="/tasks" target="_blank" style="color:#2563eb">📋 التاسكات</a>
+    <a href="/tasks/report" target="_blank" style="color:#2563eb">📊 تقرير الشركات</a>
   </div>
+
+  <div style="font-weight:700;margin-bottom:4px">1) السيرفرات الظاهرة في صفحة الاب تايم</div>
+  <div style="color:#6b7785;font-size:12px;margin-bottom:6px">شيل العلامة لإخفاء السيرفر من الصفحة العامة (بيفضل متراقب). زر إعادة العد بيمسح سجل الاب تايم للسيرفر ويبدأ العد من الأول.</div>
+  <div id="sx-list">...</div>
+  <button id="sx-reset-all" style="margin-top:8px;background:#dc2626;color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">🔄 إعادة العد لكل السيرفرات</button>
+
+  <hr style="margin:16px 0;border:0;border-top:1px solid #e3e8ee">
+
+  <div style="font-weight:700;margin-bottom:4px">2) الخدمات</div>
+  <div style="color:#6b7785;font-size:12px;margin-bottom:6px">إظهار: الخدمة تظهر في لوحة المراقبة. تنبيه: يوصلك تنبيه لما تقع. الخدمة المخفية ما بتبعتش تنبيهات.</div>
+  <div id="sx-svc">...</div>
+
+  <hr style="margin:16px 0;border:0;border-top:1px solid #e3e8ee">
+
+  <div style="font-weight:700;margin-bottom:4px">3) تنبيهات الميل</div>
+  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+    <input type="checkbox" id="sx-mail" style="width:18px;height:18px">
+    <span>تنبيهات طابور الإرسال والسبام (Mail queue / Spam)</span>
+  </label>
+  <div style="color:#6b7785;font-size:12px;margin-top:4px">لو مقفولة: مش هيوصلك أي تنبيه عن طابور الإرسال أو السبام.</div>
 </div>
-<script>
-(function(){
-  var btn = document.getElementById('sx-btn'), panel = document.getElementById('sx-panel'), list = document.getElementById('sx-list');
-  function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
-  function load(){
-    fetch('/api/status-visibility').then(function(r){return r.json();}).then(function(d){
-      list.innerHTML = d.map(function(s){
-        return '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #e3e8ee;cursor:pointer">' +
-          '<input type="checkbox" data-id="' + s.id + '"' + (s.public_visible ? ' checked' : '') + ' style="width:18px;height:18px">' +
-          '<span style="flex:1"><b>' + esc(s.name) + '</b><br><small style="color:#6b7785">' + esc(s.ip) + '</small></span></label>';
-      }).join('') || 'لا توجد سيرفرات';
-    });
-  }
-  list.addEventListener('change', function(e){
-    var cb = e.target;
-    if(!cb.getAttribute('data-id')) return;
-    fetch('/api/status-visibility', {method:'POST', headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({id: parseInt(cb.getAttribute('data-id'), 10), visible: cb.checked})});
+"""
+
+PANEL_JS = r"""
+function sxEsc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
+function sxPost(url, body){
+  return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
+    .then(function(r){ return r.json(); });
+}
+function sxLoad(){
+  fetch('/api/status-visibility').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('sx-list').innerHTML = d.map(function(s){
+      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #e3e8ee">' +
+        '<label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer">' +
+        '<input type="checkbox" data-vis="' + s.id + '"' + (s.public_visible ? ' checked' : '') + ' style="width:18px;height:18px">' +
+        '<span><b>' + sxEsc(s.name) + '</b><br><small style="color:#6b7785">' + sxEsc(s.ip) + '</small></span></label>' +
+        '<button data-reset="' + s.id + '" style="background:#dc2626;color:#fff;border:0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px">🔄 إعادة العد</button></div>';
+    }).join('') || 'لا توجد سيرفرات';
   });
-  btn.addEventListener('click', function(){
-    var open = panel.style.display === 'none';
-    panel.style.display = open ? 'block' : 'none';
-    if(open) load();
+  fetch('/api/service-prefs').then(function(r){return r.json();}).then(function(d){
+    document.getElementById('sx-mail').checked = !!d.mail_alerts;
+    document.getElementById('sx-svc').innerHTML = d.services.map(function(s){
+      var k = encodeURIComponent(s.key);
+      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #e3e8ee">' +
+        '<span style="flex:1"><b>' + sxEsc(s.name) + '</b><br><small style="color:#6b7785">' + sxEsc(s.key) + '</small></span>' +
+        '<label style="display:flex;align-items:center;gap:4px;cursor:pointer">إظهار <input type="checkbox" data-sshow="' + k + '"' + (s.show ? ' checked' : '') + ' style="width:18px;height:18px"></label>' +
+        '<label style="display:flex;align-items:center;gap:4px;cursor:pointer">تنبيه <input type="checkbox" data-salert="' + k + '"' + (s.alert ? ' checked' : '') + (s.show ? '' : ' disabled') + ' style="width:18px;height:18px"></label>' +
+        '</div>';
+    }).join('') || 'مفيش خدمات متراقبة لسه';
+  });
+}
+(function(){
+  var body = document.getElementById('sx-body');
+  body.addEventListener('change', function(e){
+    var t = e.target;
+    if(t.hasAttribute('data-vis')){
+      sxPost('/api/status-visibility', {id: parseInt(t.getAttribute('data-vis'), 10), visible: t.checked});
+    } else if(t.hasAttribute('data-sshow')){
+      sxPost('/api/service-prefs', {key: decodeURIComponent(t.getAttribute('data-sshow')), show: t.checked}).then(sxLoad);
+    } else if(t.hasAttribute('data-salert')){
+      sxPost('/api/service-prefs', {key: decodeURIComponent(t.getAttribute('data-salert')), alert: t.checked});
+    } else if(t.id === 'sx-mail'){
+      sxPost('/api/service-prefs', {mail_alerts: t.checked});
+    }
+  });
+  body.addEventListener('click', function(e){
+    var t = e.target;
+    if(t.hasAttribute('data-reset')){
+      if(confirm('هيتمسح سجل الاب تايم للسيرفر ده ويبدأ العد من الأول. متأكد؟')){
+        sxPost('/api/status-reset', {id: parseInt(t.getAttribute('data-reset'), 10)}).then(function(){ alert('تمت إعادة العد'); });
+      }
+    } else if(t.id === 'sx-reset-all'){
+      if(confirm('هيتمسح سجل الاب تايم لكل السيرفرات ويبدأ العد من الأول. متأكد؟')){
+        sxPost('/api/status-reset', {id: 'all'}).then(function(){ alert('تمت إعادة العد لكل السيرفرات'); });
+      }
+    }
   });
 })();
-</script>
 """
+
+_WIDGET_HEAD = r"""
+<div id="sx-root" dir="rtl" style="position:fixed;bottom:16px;left:16px;z-index:99999;font-family:system-ui,Tahoma,sans-serif;font-size:14px">
+  <button id="sx-btn" style="background:#2563eb;color:#fff;border:0;border-radius:999px;padding:10px 16px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3);font:inherit">⚙ الحالة / الخدمات / التاسكات</button>
+  <div id="sx-panel" style="display:none;position:absolute;bottom:48px;left:0;width:400px;max-width:92vw;max-height:75vh;overflow:auto;background:#fff;color:#1f2933;border:1px solid #cbd5e1;border-radius:12px;padding:14px;box-shadow:0 6px 24px rgba(0,0,0,.3)">
+"""
+_WIDGET_TOGGLE = r"""
+(function(){
+  var b = document.getElementById('sx-btn'), p = document.getElementById('sx-panel');
+  b.addEventListener('click', function(){
+    var open = p.style.display === 'none';
+    p.style.display = open ? 'block' : 'none';
+    if(open) sxLoad();
+  });
+})();
+"""
+DASHBOARD_WIDGET = _WIDGET_HEAD + PANEL_INNER + "</div></div><script>" + PANEL_JS + _WIDGET_TOGGLE + "</script>"
+
+ADMIN_PAGE = (
+    '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
+    '<meta name="viewport" content="width=device-width, initial-scale=1">'
+    "<title>إعدادات صفحة الحالة والتنبيهات</title></head>"
+    '<body style="font-family:system-ui,Tahoma,sans-serif;background:#f5f7fa;margin:0">'
+    '<div style="max-width:760px;margin:0 auto;padding:20px 16px"><h2>⚙ إعدادات صفحة الحالة والتنبيهات</h2>'
+    '<div style="background:#fff;border:1px solid #e3e8ee;border-radius:12px;padding:16px">'
+    + PANEL_INNER
+    + "</div></div><script>"
+    + PANEL_JS
+    + "sxLoad();</script></body></html>"
+)
 
 
 def register(app, get_db, get_settings_dict, base_dir):
@@ -190,25 +300,9 @@ def register(app, get_db, get_settings_dict, base_dir):
         )
 
     # ───────────────────────── التحكم في السيرفرات الظاهرة ─────────────────────────
-    ADMIN_HTML = """<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>Status visibility</title>
-<style>body{font-family:system-ui,Tahoma,sans-serif;background:#f5f7fa;color:#1f2933;margin:0}
-.w{max-width:700px;margin:0 auto;padding:24px 16px}.c{background:#fff;border:1px solid #e3e8ee;border-radius:10px;padding:14px 16px;margin-bottom:10px;display:flex;justify-content:space-between;align-items:center;gap:10px}
-small{color:#6b7785;display:block}label{display:flex;align-items:center;gap:8px;cursor:pointer;white-space:nowrap}
-input{width:20px;height:20px}a{color:#16a34a}</style></head><body><div class="w">
-<h2>إظهار / إخفاء السيرفرات في صفحة الحالة &middot; Show / hide on status page</h2>
-<p><a href="/status">/status</a> &middot; <a href="/">Dashboard</a></p><div id="l">...</div></div>
-<script>
-async function load(){const r=await fetch('/api/status-visibility');const d=await r.json();
-document.getElementById('l').innerHTML=d.map(s=>'<div class="c"><div><b>'+esc(s.name)+'</b><small>'+esc(s.ip)+'</small></div>'+
-'<label><input type="checkbox" '+(s.public_visible?'checked':'')+' onchange="tog('+s.id+',this.checked)"> ظاهر / Visible</label></div>').join('')||'No servers';}
-function esc(s){const d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML}
-async function tog(id,v){await fetch('/api/status-visibility',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({id:id,visible:v})});}
-load();</script></body></html>"""
-
     @app.get("/status-settings", response_class=HTMLResponse)
     async def status_settings_page():
-        return HTMLResponse(ADMIN_HTML)
+        return HTMLResponse(ADMIN_PAGE)
 
     @app.get("/api/status-visibility")
     def status_visibility_list():
@@ -227,6 +321,82 @@ load();</script></body></html>"""
             "UPDATE servers SET public_visible = ? WHERE id = ?",
             (1 if body.get("visible") else 0, int(body.get("id"))),
         )
+        conn.commit()
+        conn.close()
+        return {"ok": True}
+
+    # ───────────────────────── إعادة العد (Reset uptime) ─────────────────────────
+    def _do_reset(sid):
+        conn = get_db()
+        if sid == "all":
+            conn.execute("DELETE FROM uptime_checks")
+            conn.execute("DELETE FROM uptime_daily")
+            conn.execute("UPDATE server_state SET uptime_24h = 100.0")
+        else:
+            sid = int(sid)
+            conn.execute("DELETE FROM uptime_checks WHERE server_id = ?", (sid,))
+            conn.execute("DELETE FROM uptime_daily WHERE server_id = ?", (sid,))
+            conn.execute("UPDATE server_state SET uptime_24h = 100.0 WHERE server_id = ?", (sid,))
+        conn.commit()
+        conn.close()
+
+    @app.post("/api/status-reset")
+    async def status_reset(request: Request):
+        body = await request.json()
+        await asyncio.to_thread(_do_reset, body.get("id"))
+        return {"ok": True}
+
+    # ───────────────────────── تفضيلات الخدمات ─────────────────────────
+    @app.get("/api/service-prefs")
+    def service_prefs_list():
+        conn = get_db()
+        rows = conn.execute("SELECT services_json FROM server_state").fetchall()
+        conn.close()
+        settings = get_settings_dict()
+        prefs = parse_prefs(settings)
+        seen = {}
+        for r in rows:
+            try:
+                svcs = json.loads(r["services_json"] or "[]")
+            except Exception:
+                svcs = []
+            for s in svcs:
+                k = str(s.get("key", ""))
+                if k and k not in seen:
+                    seen[k] = s
+        services = [
+            {
+                "key": k,
+                "name": s.get("name", k),
+                "show": svc_visible(s, prefs),
+                "alert": svc_alert_enabled(s, prefs),
+            }
+            for k, s in sorted(seen.items(), key=lambda kv: str(kv[1].get("name", "")).lower())
+        ]
+        return {"services": services, "mail_alerts": settings.get("alert_on_spam", "1") == "1"}
+
+    @app.post("/api/service-prefs")
+    async def service_prefs_set(request: Request):
+        body = await request.json()
+        conn = get_db()
+        if "mail_alerts" in body:
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_on_spam', ?)",
+                ("1" if body["mail_alerts"] else "0",),
+            )
+        key = body.get("key")
+        if key:
+            prefs = parse_prefs(get_settings_dict())
+            p = prefs.get(key) if isinstance(prefs.get(key), dict) else {}
+            if "show" in body:
+                p["show"] = bool(body["show"])
+            if "alert" in body:
+                p["alert"] = bool(body["alert"])
+            prefs[key] = p
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value) VALUES ('service_prefs', ?)",
+                (json.dumps(prefs, ensure_ascii=False),),
+            )
         conn.commit()
         conn.close()
         return {"ok": True}
