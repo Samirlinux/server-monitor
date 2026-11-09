@@ -459,7 +459,12 @@ class SettingsPayload(BaseModel):
 
 @app.get("/", response_class=HTMLResponse)
 async def dashboard_page(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html", context={})
+    resp = templates.TemplateResponse(request=request, name="index.html", context={})
+    html = resp.body.decode("utf-8")
+    # زر عائم لإدارة السيرفرات الظاهرة في صفحة الاب تايم + روابط التاسكات
+    idx = html.lower().rfind("</body>")
+    html = (html[:idx] + extras.DASHBOARD_WIDGET + html[idx:]) if idx != -1 else html + extras.DASHBOARD_WIDGET
+    return HTMLResponse(html)
 
 
 @app.get("/server/{server_id}", response_class=HTMLResponse)

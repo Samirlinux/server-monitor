@@ -23,6 +23,50 @@ ALERT_REPEAT_SEC = int(os.getenv("ALERT_REPEAT_SEC", "21600"))  # ما يكرر�
 STATUS_TITLE = os.getenv("STATUS_TITLE", "حالة السيرفرات")
 
 
+# ───────────────────────── ودجت لوحة المراقبة (بيتحقن في الصفحة الرئيسية) ─────────────────────────
+DASHBOARD_WIDGET = """
+<div id="sx-root" dir="rtl" style="position:fixed;bottom:16px;left:16px;z-index:99999;font-family:system-ui,Tahoma,sans-serif;font-size:14px">
+  <button id="sx-btn" style="background:#2563eb;color:#fff;border:0;border-radius:999px;padding:10px 16px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3);font:inherit">👁 صفحة الحالة / التاسكات</button>
+  <div id="sx-panel" style="display:none;position:absolute;bottom:48px;left:0;width:340px;max-width:92vw;max-height:70vh;overflow:auto;background:#fff;color:#1f2933;border:1px solid #cbd5e1;border-radius:12px;padding:14px;box-shadow:0 6px 24px rgba(0,0,0,.3)">
+    <div style="display:flex;gap:10px;flex-wrap:wrap;margin-bottom:10px">
+      <a href="/status" target="_blank" style="color:#2563eb">🌐 صفحة الاب تايم</a>
+      <a href="/tasks" target="_blank" style="color:#2563eb">📋 التاسكات</a>
+      <a href="/tasks/report" target="_blank" style="color:#2563eb">📊 تقرير الشركات</a>
+    </div>
+    <div style="font-weight:600;margin-bottom:6px">السيرفرات الظاهرة في صفحة الاب تايم</div>
+    <div style="color:#6b7785;font-size:12px;margin-bottom:8px">شيل العلامة لإخفاء السيرفر من الصفحة العامة (بيفضل متراقب وبيبعت تنبيهات).</div>
+    <div id="sx-list">...</div>
+  </div>
+</div>
+<script>
+(function(){
+  var btn = document.getElementById('sx-btn'), panel = document.getElementById('sx-panel'), list = document.getElementById('sx-list');
+  function esc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
+  function load(){
+    fetch('/api/status-visibility').then(function(r){return r.json();}).then(function(d){
+      list.innerHTML = d.map(function(s){
+        return '<label style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #e3e8ee;cursor:pointer">' +
+          '<input type="checkbox" data-id="' + s.id + '"' + (s.public_visible ? ' checked' : '') + ' style="width:18px;height:18px">' +
+          '<span style="flex:1"><b>' + esc(s.name) + '</b><br><small style="color:#6b7785">' + esc(s.ip) + '</small></span></label>';
+      }).join('') || 'لا توجد سيرفرات';
+    });
+  }
+  list.addEventListener('change', function(e){
+    var cb = e.target;
+    if(!cb.getAttribute('data-id')) return;
+    fetch('/api/status-visibility', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({id: parseInt(cb.getAttribute('data-id'), 10), visible: cb.checked})});
+  });
+  btn.addEventListener('click', function(){
+    var open = panel.style.display === 'none';
+    panel.style.display = open ? 'block' : 'none';
+    if(open) load();
+  });
+})();
+</script>
+"""
+
+
 def register(app, get_db, get_settings_dict, base_dir):
     """يسجّل صفحة /status و API ويرجع دالة start() تنتج الـ background tasks."""
 
