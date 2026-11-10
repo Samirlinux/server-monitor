@@ -1,548 +1,889 @@
-"""
-extras.py  —  إضافات لمشروع server-monitor
-1) تقرير كل ساعة (Load / RAM / Disk / CPU / Uptime + التاريخ والوقت) على Telegram و Slack
-2) صفحة Status عامة /status تجمع كل السيرفرات (شبيهة بـ UptimeRobot)
-
-لا يغيّر أي سلوك موجود. بيقرأ من نفس الـ DB والإعدادات (Telegram / Slack).
-"""
 import asyncio
+import io
 import json
 import os
+import re
+import socket
+import subprocess
 import time
-from datetime import datetime, timedelta
+from datetime import datetime
+from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
-from fastapi import Request
-from fastapi.responses import HTMLResponse, JSONResponse
-
-REPORT_EVERY_SEC = int(os.getenv("REPORT_EVERY_SEC", "3600"))  # كل ساعة
-REPORTS_ENABLED = os.getenv("HOURLY_REPORTS", "0") == "1"   # التقرير الدوري مقفول افتراضياً
-DISK_ALERT_PCT = float(os.getenv("DISK_ALERT_PCT", "90"))    # تنبيه لو الهارد وصل الحد ده
-RAM_ALERT_PCT = float(os.getenv("RAM_ALERT_PCT", "90"))      # تنبيه لو الرام وصلت الحد ده
-ALERT_REPEAT_SEC = int(os.getenv("ALERT_REPEAT_SEC", "21600"))  # ما يكررش نفس التنبيه قبل 6 ساعات
-STATUS_TITLE = os.getenv("STATUS_TITLE", "حالة السيرفرات")
+import paramiko
 
 
-# ───────────────────────── تفضيلات الخدمات (إظهار في اللوحة / تنبيه) ─────────────────────────
-DEFAULT_ALERT_KEYWORDS = [
-    k.strip().lower()
-    for k in os.getenv("ALERT_SERVICES", "apache,httpd,mysql,maria").split(",")
-    if k.strip()
+# Default service ports monitored automatically as soon as an IP is added
+DEFAULT_SERVICE_PORTS = [
+    {"key": "apache_http", "name": "Apache / Web (HTTP)", "category": "web", "port": 80},
+    {"key": "apache_https", "name": "Apache / Web (HTTPS)", "category": "web", "port": 443},
+    {"key": "mysql", "name": "MySQL / MariaDB", "category": "db", "port": 3306},
+    {"key": "postgres", "name": "PostgreSQL", "category": "db", "port": 5432},
+    {"key": "smtp", "name": "Mail SMTP (25)", "category": "mail", "port": 25},
+    {"key": "smtp_sub", "name": "Mail Submission (587)", "category": "mail", "port": 587},
+    {"key": "smtps", "name": "Mail SMTPS (465)", "category": "mail", "port": 465},
+    {"key": "ssh", "name": "SSH Server", "category": "system", "port": 22},
+]
+
+# Major DNSBL / Spam Blacklists for checking server IP reputation
+DNSBL_PROVIDERS = [
+    ("Spamhaus ZEN", "zen.spamhaus.org"),
+    ("SpamCop", "bl.spamcop.net"),
+    ("Barracuda RBL", "b.barracudacentral.org"),
+    ("SORBS DNSBL", "dnsbl.sorbs.net"),
+    ("PSBL Surriel", "psbl.surriel.com"),
 ]
 
 
-def parse_prefs(settings):
-    """بيرجّع {service_key: {"show": bool, "alert": bool}} من جدول الإعدادات."""
+async def check_tcp_port(ip: str, port: int, timeout: float = 2.2) -> Tuple[bool, float, str]:
+    """
+    Fast async TCP connect check with banner / HTTP status probe.
+    Returns (is_up, latency_ms, banner_or_detail).
+    """
+    start = time.perf_counter()
     try:
-        p = json.loads(settings.get("service_prefs") or "{}")
-        return p if isinstance(p, dict) else {}
-    except Exception:
-        return {}
+        reader, writer = await asyncio.wait_for(
+            asyncio.open_connection(ip, port), timeout=timeout
+        )
+        latency_ms = round((time.perf_counter() - start) * 1000, 1)
+        detail = f"Port {port} Open ({latency_ms}ms)"
+
+        # Optional quick protocol probe for richer detail
+        try:
+            if port == 80:
+                req = f"HEAD / HTTP/1.1\r\nHost: {ip}\r\nConnection: close\r\n\r\n"
+                writer.write(req.encode("utf-8"))
+                await writer.drain()
+                first_line = await asyncio.wait_for(reader.readline(), timeout=1.0)
+                if first_line:
+                    status_line = first_line.decode("utf-8", errors="ignore").strip()
+                    detail = status_line or detail
+            elif port in (22, 25, 587, 3306):
+                banner = await asyncio.wait_for(reader.read(128), timeout=0.8)
+                if banner:
+                    clean_banner = re.sub(r"[^\x20-\x7E]", " ", banner.decode("utf-8", errors="ignore")).strip()
+                    if clean_banner:
+                        detail = clean_banner[:70]
+        except Exception:
+            pass
+
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True, latency_ms, detail
+    except asyncio.TimeoutError:
+        return False, 0.0, f"Timeout on port {port} (>{timeout}s)"
+    except Exception as e:
+        return False, 0.0, f"Connection refused / unreachable ({type(e).__name__})"
 
 
-def svc_visible(svc, prefs):
-    p = prefs.get(str(svc.get("key", "")))
-    if isinstance(p, dict) and "show" in p:
-        return bool(p["show"])
-    return True
+def _check_single_dnsbl_sync(ip: str, provider_name: str, zone: str) -> Dict[str, Any]:
+    """Reverse-IP lookup against a DNSBL zone."""
+    try:
+        # Validate IPv4 format
+        parts = ip.strip().split(".")
+        if len(parts) != 4 or not all(p.isdigit() for p in parts):
+            return {"provider": provider_name, "zone": zone, "listed": False, "detail": "Skipped (non-IPv4)"}
+        reversed_ip = ".".join(reversed(parts))
+        query = f"{reversed_ip}.{zone}"
+        socket.setdefaulttimeout(2.0)
+        res = socket.gethostbyname(query)
+        # Spamhaus may return 127.255.255.x if open resolver is blocked; only 127.0.0.x is an actual listing
+        if res.startswith("127.255."):
+            return {"provider": provider_name, "zone": zone, "listed": False, "detail": "Clean (Resolver limit)"}
+        return {"provider": provider_name, "zone": zone, "listed": True, "detail": f"LISTED ({res})"}
+    except socket.gaierror:
+        return {"provider": provider_name, "zone": zone, "listed": False, "detail": "Clean"}
+    except Exception as e:
+        return {"provider": provider_name, "zone": zone, "listed": False, "detail": f"Check skipped ({type(e).__name__})"}
 
 
-def svc_alert_enabled(svc, prefs):
-    """الخدمة المخفية ما بتبعتش تنبيه. لو ما اتحددش اختيار: Apache وقواعد البيانات بس."""
-    if not svc_visible(svc, prefs):
-        return False
-    p = prefs.get(str(svc.get("key", "")))
-    if isinstance(p, dict) and "alert" in p:
-        return bool(p["alert"])
-    text = f"{svc.get('key', '')} {svc.get('name', '')}".lower()
-    return any(k in text for k in DEFAULT_ALERT_KEYWORDS)
-
-
-# ───────────────────────── لوحة الإعدادات (ودجت داخل اللوحة + صفحة /status-settings) ─────────────────────────
-PANEL_INNER = r"""
-<div id="sx-body" style="font-size:14px;color:#1f2933">
-  <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-    <a href="/status" target="_blank" style="color:#2563eb">🌐 صفحة الاب تايم</a>
-    <a href="/tasks" target="_blank" style="color:#2563eb">📋 التاسكات</a>
-    <a href="/tasks/report" target="_blank" style="color:#2563eb">📊 تقرير الشركات</a>
-  </div>
-
-  <div style="font-weight:700;margin-bottom:4px">1) السيرفرات الظاهرة في صفحة الاب تايم</div>
-  <div style="color:#6b7785;font-size:12px;margin-bottom:6px">شيل العلامة لإخفاء السيرفر من الصفحة العامة (بيفضل متراقب). زر إعادة العد بيمسح سجل الاب تايم للسيرفر ويبدأ العد من الأول.</div>
-  <div id="sx-list">...</div>
-  <button id="sx-reset-all" style="margin-top:8px;background:#dc2626;color:#fff;border:0;border-radius:6px;padding:6px 12px;cursor:pointer">🔄 إعادة العد لكل السيرفرات</button>
-
-  <hr style="margin:16px 0;border:0;border-top:1px solid #e3e8ee">
-
-  <div style="font-weight:700;margin-bottom:4px">2) الخدمات</div>
-  <div style="color:#6b7785;font-size:12px;margin-bottom:6px">إظهار: الخدمة تظهر في لوحة المراقبة. تنبيه: يوصلك تنبيه لما تقع. الخدمة المخفية ما بتبعتش تنبيهات.</div>
-  <div id="sx-svc">...</div>
-
-  <hr style="margin:16px 0;border:0;border-top:1px solid #e3e8ee">
-
-  <div style="font-weight:700;margin-bottom:4px">3) تنبيهات الميل</div>
-  <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
-    <input type="checkbox" id="sx-mail" style="width:18px;height:18px">
-    <span>تنبيهات طابور الإرسال والسبام (Mail queue / Spam)</span>
-  </label>
-  <div style="color:#6b7785;font-size:12px;margin-top:4px">لو مقفولة: مش هيوصلك أي تنبيه عن طابور الإرسال أو السبام.</div>
-</div>
-"""
-
-PANEL_JS = r"""
-function sxEsc(s){var d=document.createElement('div');d.textContent=s==null?'':String(s);return d.innerHTML;}
-function sxPost(url, body){
-  return fetch(url, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)})
-    .then(function(r){ return r.json(); });
-}
-function sxLoad(){
-  fetch('/api/status-visibility').then(function(r){return r.json();}).then(function(d){
-    document.getElementById('sx-list').innerHTML = d.map(function(s){
-      return '<div style="display:flex;align-items:center;gap:8px;padding:6px 0;border-bottom:1px solid #e3e8ee">' +
-        '<label style="display:flex;align-items:center;gap:8px;flex:1;cursor:pointer">' +
-        '<input type="checkbox" data-vis="' + s.id + '"' + (s.public_visible ? ' checked' : '') + ' style="width:18px;height:18px">' +
-        '<span><b>' + sxEsc(s.name) + '</b><br><small style="color:#6b7785">' + sxEsc(s.ip) + '</small></span></label>' +
-        '<button data-reset="' + s.id + '" style="background:#dc2626;color:#fff;border:0;border-radius:6px;padding:4px 8px;cursor:pointer;font-size:12px">🔄 إعادة العد</button></div>';
-    }).join('') || 'لا توجد سيرفرات';
-  });
-  fetch('/api/service-prefs').then(function(r){return r.json();}).then(function(d){
-    document.getElementById('sx-mail').checked = !!d.mail_alerts;
-    document.getElementById('sx-svc').innerHTML = d.services.map(function(s){
-      var k = encodeURIComponent(s.key);
-      return '<div style="display:flex;align-items:center;gap:10px;padding:6px 0;border-bottom:1px solid #e3e8ee">' +
-        '<span style="flex:1"><b>' + sxEsc(s.name) + '</b><br><small style="color:#6b7785">' + sxEsc(s.key) + '</small></span>' +
-        '<label style="display:flex;align-items:center;gap:4px;cursor:pointer">إظهار <input type="checkbox" data-sshow="' + k + '"' + (s.show ? ' checked' : '') + ' style="width:18px;height:18px"></label>' +
-        '<label style="display:flex;align-items:center;gap:4px;cursor:pointer">تنبيه <input type="checkbox" data-salert="' + k + '"' + (s.alert ? ' checked' : '') + (s.show ? '' : ' disabled') + ' style="width:18px;height:18px"></label>' +
-        '</div>';
-    }).join('') || 'مفيش خدمات متراقبة لسه';
-  });
-}
-(function(){
-  var body = document.getElementById('sx-body');
-  body.addEventListener('change', function(e){
-    var t = e.target;
-    if(t.hasAttribute('data-vis')){
-      sxPost('/api/status-visibility', {id: parseInt(t.getAttribute('data-vis'), 10), visible: t.checked});
-    } else if(t.hasAttribute('data-sshow')){
-      sxPost('/api/service-prefs', {key: decodeURIComponent(t.getAttribute('data-sshow')), show: t.checked}).then(sxLoad);
-    } else if(t.hasAttribute('data-salert')){
-      sxPost('/api/service-prefs', {key: decodeURIComponent(t.getAttribute('data-salert')), alert: t.checked});
-    } else if(t.id === 'sx-mail'){
-      sxPost('/api/service-prefs', {mail_alerts: t.checked});
+async def check_ip_blacklists(ip: str) -> Dict[str, Any]:
+    """Check if the server IP is listed on global email spam blacklists (RBLs)."""
+    loop = asyncio.get_running_loop()
+    tasks = [
+        loop.run_in_executor(None, _check_single_dnsbl_sync, ip, name, zone)
+        for name, zone in DNSBL_PROVIDERS
+    ]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    clean_results = []
+    listed_on = []
+    for r in results:
+        if isinstance(r, dict):
+            clean_results.append(r)
+            if r.get("listed"):
+                listed_on.append(r["provider"])
+    return {
+        "is_blacklisted": len(listed_on) > 0,
+        "listed_count": len(listed_on),
+        "listed_providers": listed_on,
+        "checks": clean_results,
+        "checked_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     }
-  });
-  body.addEventListener('click', function(e){
-    var t = e.target;
-    if(t.hasAttribute('data-reset')){
-      if(confirm('هيتمسح سجل الاب تايم للسيرفر ده ويبدأ العد من الأول. متأكد؟')){
-        sxPost('/api/status-reset', {id: parseInt(t.getAttribute('data-reset'), 10)}).then(function(){ alert('تمت إعادة العد'); });
-      }
-    } else if(t.id === 'sx-reset-all'){
-      if(confirm('هيتمسح سجل الاب تايم لكل السيرفرات ويبدأ العد من الأول. متأكد؟')){
-        sxPost('/api/status-reset', {id: 'all'}).then(function(){ alert('تمت إعادة العد لكل السيرفرات'); });
-      }
+
+
+def _create_ssh_client(
+    ip: str,
+    ssh_port: int = 22,
+    ssh_user: str = "root",
+    ssh_password: Optional[str] = None,
+    ssh_key: Optional[str] = None,
+    timeout: float = 4.0,
+) -> paramiko.SSHClient:
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    connect_kwargs: Dict[str, Any] = {
+        "hostname": ip,
+        "port": int(ssh_port or 22),
+        "username": (ssh_user or "root").strip(),
+        "timeout": timeout,
+        "banner_timeout": timeout,
+        "auth_timeout": timeout,
+        "allow_agent": False,
+        "look_for_keys": False,
     }
-  });
-})();
-"""
-
-_WIDGET_HEAD = r"""
-<div id="sx-root" dir="rtl" style="position:fixed;bottom:16px;left:16px;z-index:99999;font-family:system-ui,Tahoma,sans-serif;font-size:14px">
-  <button id="sx-btn" style="background:#2563eb;color:#fff;border:0;border-radius:999px;padding:10px 16px;cursor:pointer;box-shadow:0 2px 10px rgba(0,0,0,.3);font:inherit">⚙ الحالة / الخدمات / التاسكات</button>
-  <div id="sx-panel" style="display:none;position:absolute;bottom:48px;left:0;width:400px;max-width:92vw;max-height:75vh;overflow:auto;background:#fff;color:#1f2933;border:1px solid #cbd5e1;border-radius:12px;padding:14px;box-shadow:0 6px 24px rgba(0,0,0,.3)">
-"""
-_WIDGET_TOGGLE = r"""
-(function(){
-  var b = document.getElementById('sx-btn'), p = document.getElementById('sx-panel');
-  b.addEventListener('click', function(){
-    var open = p.style.display === 'none';
-    p.style.display = open ? 'block' : 'none';
-    if(open) sxLoad();
-  });
-})();
-"""
-DASHBOARD_WIDGET = _WIDGET_HEAD + PANEL_INNER + "</div></div><script>" + PANEL_JS + _WIDGET_TOGGLE + "</script>"
-
-ADMIN_PAGE = (
-    '<!DOCTYPE html><html lang="ar" dir="rtl"><head><meta charset="utf-8">'
-    '<meta name="viewport" content="width=device-width, initial-scale=1">'
-    "<title>إعدادات صفحة الحالة والتنبيهات</title></head>"
-    '<body style="font-family:system-ui,Tahoma,sans-serif;background:#f5f7fa;margin:0">'
-    '<div style="max-width:760px;margin:0 auto;padding:20px 16px"><h2>⚙ إعدادات صفحة الحالة والتنبيهات</h2>'
-    '<div style="background:#fff;border:1px solid #e3e8ee;border-radius:12px;padding:16px">'
-    + PANEL_INNER
-    + "</div></div><script>"
-    + PANEL_JS
-    + "sxLoad();</script></body></html>"
-)
-
-
-def register(app, get_db, get_settings_dict, base_dir):
-    """يسجّل صفحة /status و API ويرجع دالة start() تنتج الـ background tasks."""
-
-    # ───────────────────────── Uptime اليومي (للـ 30/90 يوم) ─────────────────────────
-    def init_tables():
-        conn = get_db()
-        conn.execute(
-            """CREATE TABLE IF NOT EXISTS uptime_daily (
-                   server_id INTEGER NOT NULL,
-                   day TEXT NOT NULL,
-                   total INTEGER DEFAULT 0,
-                   up INTEGER DEFAULT 0,
-                   PRIMARY KEY (server_id, day)
-               )"""
-        )
-        cols = [r[1] for r in conn.execute("PRAGMA table_info(servers)").fetchall()]
-        if "public_visible" not in cols:
-            conn.execute("ALTER TABLE servers ADD COLUMN public_visible INTEGER DEFAULT 1")
-        conn.commit()
-        conn.close()
-
-    def aggregate(days_back: int = 1):
-        since = (datetime.now() - timedelta(days=days_back)).strftime("%Y-%m-%d 00:00:00")
-        conn = get_db()
-        conn.execute(
-            """INSERT OR REPLACE INTO uptime_daily (server_id, day, total, up)
-               SELECT server_id, substr(created_at, 1, 10),
-                      COUNT(*), SUM(CASE WHEN status = 'UP' THEN 1 ELSE 0 END)
-               FROM uptime_checks
-               WHERE created_at >= ?
-               GROUP BY server_id, substr(created_at, 1, 10)""",
-            (since,),
-        )
-        conn.commit()
-        conn.close()
-
-    async def aggregate_loop():
-        await asyncio.to_thread(aggregate, 7)  # backfill أول مرة
-        while True:
-            await asyncio.sleep(60)
+    if ssh_key and ssh_key.strip():
+        key_stream = io.StringIO(ssh_key.strip())
+        pkey = None
+        for key_cls in (paramiko.RSAKey, paramiko.Ed25519Key, paramiko.ECDSAKey):
             try:
-                await asyncio.to_thread(aggregate, 1)
-            except Exception as e:
-                print(f"[aggregate_loop] {e}")
-
-    # ───────────────────────── صفحة Status العامة ─────────────────────────
-    @app.get("/status", response_class=HTMLResponse)
-    async def status_page():
-        path = os.path.join(base_dir, "status.html")
-        with open(path, "r", encoding="utf-8") as f:
-            html = f.read().replace("__STATUS_TITLE__", STATUS_TITLE)
-        return HTMLResponse(html)
-
-    def _pct(up, total):
-        return None if not total else round(up * 100.0 / total, 2)
-
-    @app.get("/api/public-status")
-    def public_status():
-        conn = get_db()
-        servers = conn.execute(
-            """SELECT s.id, s.name, st.status, st.uptime_24h, st.ping_ms, st.last_checked
-               FROM servers s LEFT JOIN server_state st ON s.id = st.server_id
-               WHERE COALESCE(s.public_visible, 1) = 1
-               ORDER BY s.name COLLATE NOCASE"""
-        ).fetchall()
-        since = (datetime.now() - timedelta(days=89)).strftime("%Y-%m-%d")
-        daily = conn.execute(
-            "SELECT server_id, day, total, up FROM uptime_daily WHERE day >= ?", (since,)
-        ).fetchall()
-        conn.close()
-
-        by_server = {}
-        for r in daily:
-            by_server.setdefault(r["server_id"], {})[r["day"]] = (r["total"] or 0, r["up"] or 0)
-
-        today = datetime.now().date()
-        day_list = [(today - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(89, -1, -1)]
-
-        out, up_count, down_count = [], 0, 0
-        for s in servers:
-            rows = by_server.get(s["id"], {})
-            bars = [{"day": d, "pct": _pct(rows.get(d, (0, 0))[1], rows.get(d, (0, 0))[0])} for d in day_list]
-
-            def window(n):
-                t = u = 0
-                for d in day_list[-n:]:
-                    tt, uu = rows.get(d, (0, 0))
-                    t += tt
-                    u += uu
-                return _pct(u, t)
-
-            status = s["status"] or "UNKNOWN"
-            if status == "UP":
-                up_count += 1
-            elif status == "DOWN":
-                down_count += 1
-            out.append(
-                {
-                    "name": s["name"],
-                    "status": status,
-                    "ping_ms": s["ping_ms"],
-                    "last_checked": s["last_checked"],
-                    "uptime_24h": s["uptime_24h"],
-                    "uptime_7d": window(7),
-                    "uptime_30d": window(30),
-                    "uptime_90d": window(90),
-                    "bars": bars,
-                }
-            )
-
-        overall = "up" if down_count == 0 else ("down" if up_count == 0 else "partial")
-        return JSONResponse(
-            {
-                "overall": overall,
-                "up": up_count,
-                "down": down_count,
-                "total": len(out),
-                "servers": out,
-                "generated": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-            }
-        )
-
-    # ───────────────────────── التحكم في السيرفرات الظاهرة ─────────────────────────
-    @app.get("/status-settings", response_class=HTMLResponse)
-    async def status_settings_page():
-        return HTMLResponse(ADMIN_PAGE)
-
-    @app.get("/api/status-visibility")
-    def status_visibility_list():
-        conn = get_db()
-        rows = conn.execute(
-            "SELECT id, name, ip, COALESCE(public_visible, 1) AS public_visible FROM servers ORDER BY name COLLATE NOCASE"
-        ).fetchall()
-        conn.close()
-        return [dict(r) for r in rows]
-
-    @app.post("/api/status-visibility")
-    async def status_visibility_set(request: Request):
-        body = await request.json()
-        conn = get_db()
-        conn.execute(
-            "UPDATE servers SET public_visible = ? WHERE id = ?",
-            (1 if body.get("visible") else 0, int(body.get("id"))),
-        )
-        conn.commit()
-        conn.close()
-        return {"ok": True}
-
-    # ───────────────────────── إعادة العد (Reset uptime) ─────────────────────────
-    def _do_reset(sid):
-        conn = get_db()
-        if sid == "all":
-            conn.execute("DELETE FROM uptime_checks")
-            conn.execute("DELETE FROM uptime_daily")
-            conn.execute("UPDATE server_state SET uptime_24h = 100.0")
-        else:
-            sid = int(sid)
-            conn.execute("DELETE FROM uptime_checks WHERE server_id = ?", (sid,))
-            conn.execute("DELETE FROM uptime_daily WHERE server_id = ?", (sid,))
-            conn.execute("UPDATE server_state SET uptime_24h = 100.0 WHERE server_id = ?", (sid,))
-        conn.commit()
-        conn.close()
-
-    @app.post("/api/status-reset")
-    async def status_reset(request: Request):
-        body = await request.json()
-        await asyncio.to_thread(_do_reset, body.get("id"))
-        return {"ok": True}
-
-    # ───────────────────────── تفضيلات الخدمات ─────────────────────────
-    @app.get("/api/service-prefs")
-    def service_prefs_list():
-        conn = get_db()
-        rows = conn.execute("SELECT services_json FROM server_state").fetchall()
-        conn.close()
-        settings = get_settings_dict()
-        prefs = parse_prefs(settings)
-        seen = {}
-        for r in rows:
-            try:
-                svcs = json.loads(r["services_json"] or "[]")
+                key_stream.seek(0)
+                pkey = key_cls.from_private_key(key_stream)
+                break
             except Exception:
-                svcs = []
-            for s in svcs:
-                k = str(s.get("key", ""))
-                if k and k not in seen:
-                    seen[k] = s
-        services = [
-            {
-                "key": k,
-                "name": s.get("name", k),
-                "show": svc_visible(s, prefs),
-                "alert": svc_alert_enabled(s, prefs),
-            }
-            for k, s in sorted(seen.items(), key=lambda kv: str(kv[1].get("name", "")).lower())
-        ]
-        return {"services": services, "mail_alerts": settings.get("alert_on_spam", "1") == "1"}
-
-    @app.post("/api/service-prefs")
-    async def service_prefs_set(request: Request):
-        body = await request.json()
-        conn = get_db()
-        if "mail_alerts" in body:
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('alert_on_spam', ?)",
-                ("1" if body["mail_alerts"] else "0",),
-            )
-        key = body.get("key")
-        if key:
-            prefs = parse_prefs(get_settings_dict())
-            p = prefs.get(key) if isinstance(prefs.get(key), dict) else {}
-            if "show" in body:
-                p["show"] = bool(body["show"])
-            if "alert" in body:
-                p["alert"] = bool(body["alert"])
-            prefs[key] = p
-            conn.execute(
-                "INSERT OR REPLACE INTO settings (key, value) VALUES ('service_prefs', ?)",
-                (json.dumps(prefs, ensure_ascii=False),),
-            )
-        conn.commit()
-        conn.close()
-        return {"ok": True}
-
-    # ───────────────────────── تنبيهات الهارد والرام (فقط عند تجاوز الحد) ─────────────────────────
-    _last_alert = {}
-
-    async def check_thresholds():
-        conn = get_db()
-        rows = conn.execute(
-            """SELECT s.id, s.name, s.ip, st.*
-               FROM servers s JOIN server_state st ON s.id = st.server_id"""
-        ).fetchall()
-        conn.close()
-        settings = get_settings_dict()
-        now = time.time()
-        for row in rows:
-            if not row["ssh_connected"] or row["status"] != "UP":
                 continue
-            for key, label, val, limit, detail in (
-                ("disk", "💽 مساحة الهارد / Disk", row["disk_usage"], DISK_ALERT_PCT, row["disk_detail"]),
-                ("ram", "🧠 الرام / RAM", row["ram_usage"], RAM_ALERT_PCT, row["ram_detail"]),
-            ):
-                k = (row["id"], key)
-                if (val or 0) >= limit:
-                    if now - _last_alert.get(k, 0) >= ALERT_REPEAT_SEC:
-                        _last_alert[k] = now
-                        text = (
-                            f"⚠️ تحذير: {label} وصل {val}%\n"
-                            f"🖥 السيرفر: {row['name']} ({row['ip']})\n"
-                            f"📊 التفاصيل: {detail or '-'}\n"
-                            f"📅 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}"
-                        )
-                        await send_text(settings, text)
-                else:
-                    _last_alert.pop(k, None)  # رجع طبيعي، لو عدّى الحد تاني يبعت من جديد
+        if pkey:
+            connect_kwargs["pkey"] = pkey
+    if ssh_password and ssh_password.strip():
+        connect_kwargs["password"] = ssh_password
+    client.connect(**connect_kwargs)
+    return client
 
-    async def threshold_loop():
-        await asyncio.sleep(90)
-        while True:
+
+INSPECTION_BASH_SCRIPT = r"""
+export LC_ALL=C
+echo "===UPTIME==="
+uptime -p 2>/dev/null || uptime
+cat /proc/uptime 2>/dev/null | awk '{print $1}'
+
+echo "===LOADAVG==="
+cat /proc/loadavg 2>/dev/null | awk '{print $1, $2, $3}'
+nproc 2>/dev/null || grep -c ^processor /proc/cpuinfo 2>/dev/null || echo 1
+
+echo "===RESOURCES==="
+top -bn1 2>/dev/null | grep -E "Cpu\(s\)|%Cpu" | head -n1
+free -m 2>/dev/null | awk '/Mem:/ {printf "%d %d %.1f\n", $3, $2, ($3/$2)*100}'
+df -h / 2>/dev/null | awk 'NR==2 {print $3, $2, $5}'
+
+echo "===SERVICES==="
+for svc in apache2 httpd lshttpd nginx mysql mariadb postgresql redis redis-server postfix exim4 exim dovecot named bind9 fail2ban cpanel crond cron; do
+    if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1 || [ -f "/etc/init.d/${svc}" ] || pgrep -x "${svc}" >/dev/null 2>&1; then
+        st=$(systemctl is-active "${svc}" 2>/dev/null || service "${svc}" status 2>/dev/null | grep -Eo "running|active|stopped|dead" | head -n1)
+        echo "${svc}:${st}"
+    fi
+done
+
+echo "===MAIL_QUEUE==="
+if command -v exim >/dev/null 2>&1; then
+    echo "MTA:exim"
+    q_count=$(exim -bpc 2>/dev/null || echo 0)
+    echo "QUEUE:${q_count}"
+elif command -v postqueue >/dev/null 2>&1; then
+    echo "MTA:postfix"
+    q_count=$(postqueue -p 2>/dev/null | tail -n1 | grep -Eo '[0-9]+ Request' | awk '{print $1}')
+    echo "QUEUE:${q_count:-0}"
+elif command -v mailq >/dev/null 2>&1; then
+    echo "MTA:sendmail"
+    q_count=$(mailq 2>/dev/null | grep -c "^[A-F0-9]" || echo 0)
+    echo "QUEUE:${q_count:-0}"
+else
+    echo "MTA:unknown"
+    echo "QUEUE:0"
+fi
+
+echo "===MAIL_STATS==="
+MAIL_LOG=""
+for f in /var/log/mail.log /var/log/maillog /var/log/exim4/mainlog /var/log/exim_mainlog; do
+    if [ -r "$f" ]; then
+        MAIL_LOG="$f"
+        break
+    fi
+done
+
+if [ -n "$MAIL_LOG" ]; then
+    echo "LOGFILE:$MAIL_LOG"
+    tail -n 5000 "$MAIL_LOG" > /tmp/.mon_mail_sample 2>/dev/null
+    sent_pf=$(grep -c "status=sent" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    sent_ex=$(grep -c "=>" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    SENT=$((sent_pf + sent_ex))
+    DEFERRED=$(grep -ciE "status=deferred|defer \(" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    BOUNCED=$(grep -ciE "status=bounced|\*\* " /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    REJECTED=$(grep -ciE "reject:|rejected|550 |554 |spam|blocked|blacklisted" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    AUTH_FAIL=$(grep -ciE "authentication failed|sasl_method.*failed|auth failed" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    echo "SENT:${SENT}"
+    echo "DEFERRED:${DEFERRED}"
+    echo "BOUNCED:${BOUNCED}"
+    echo "REJECTED:${REJECTED}"
+    echo "AUTH_FAIL:${AUTH_FAIL}"
+    echo "===TOP_SENDERS==="
+    grep -Eo "from=<[^>]+>|A=[^ ]+" /tmp/.mon_mail_sample 2>/dev/null | sort | uniq -c | sort -nr | head -n 5
+    rm -f /tmp/.mon_mail_sample
+elif command -v journalctl >/dev/null 2>&1; then
+    echo "LOGFILE:journalctl"
+    journalctl -u postfix -u exim4 --no-pager -n 2000 > /tmp/.mon_mail_sample 2>/dev/null
+    SENT=$(grep -cE "status=sent|=>" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    DEFERRED=$(grep -ciE "status=deferred|defer" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    BOUNCED=$(grep -ciE "status=bounced" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    REJECTED=$(grep -ciE "reject:|550 |554 |spam|blocked" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    AUTH_FAIL=$(grep -ciE "authentication failed" /tmp/.mon_mail_sample 2>/dev/null || echo 0)
+    echo "SENT:${SENT}"
+    echo "DEFERRED:${DEFERRED}"
+    echo "BOUNCED:${BOUNCED}"
+    echo "REJECTED:${REJECTED}"
+    echo "AUTH_FAIL:${AUTH_FAIL}"
+    echo "===TOP_SENDERS==="
+    grep -Eo "from=<[^>]+>" /tmp/.mon_mail_sample 2>/dev/null | sort | uniq -c | sort -nr | head -n 5
+    rm -f /tmp/.mon_mail_sample
+else
+    echo "SENT:0"
+    echo "DEFERRED:0"
+    echo "BOUNCED:0"
+    echo "REJECTED:0"
+    echo "AUTH_FAIL:0"
+fi
+"""
+
+
+def _get_local_ips() -> set:
+    ips = {"127.0.0.1", "localhost", "::1"}
+    try:
+        hostname = socket.gethostname()
+        ips.add(hostname)
+        for info in socket.getaddrinfo(hostname, None):
+            ips.add(info[4][0])
+    except Exception:
+        pass
+    try:
+        out = subprocess.check_output(["hostname", "-I"], timeout=1.5).decode("utf-8", errors="ignore")
+        for part in out.split():
+            ips.add(part.strip())
+    except Exception:
+        pass
+    try:
+        pub = subprocess.check_output(["curl", "-s", "--max-time", "2", "https://api.ipify.org"], timeout=2.5).decode("utf-8", errors="ignore").strip()
+        if pub:
+            ips.add(pub)
+    except Exception:
+        pass
+    return ips
+
+
+LOCAL_HOST_IPS = _get_local_ips()
+
+
+def is_local_server_ip(ip: str) -> bool:
+    return os.name != "nt" and ip.strip() in LOCAL_HOST_IPS
+
+
+def _local_deep_inspect_sync() -> Dict[str, Any]:
+    """Run inspection directly on the local Linux server without needing SSH."""
+    res = subprocess.run(
+        ["bash", "-c", INSPECTION_BASH_SCRIPT],
+        capture_output=True,
+        text=True,
+        timeout=5,
+    )
+    return _parse_ssh_inspection_output(res.stdout)
+
+
+def _ssh_deep_inspect_sync(server: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Runs a single combined bash inspection command over SSH so it executes in <1 second.
+    """
+    client = _create_ssh_client(
+        ip=server["ip"],
+        ssh_port=server.get("ssh_port", 22),
+        ssh_user=server.get("ssh_user", "root"),
+        ssh_password=server.get("ssh_password"),
+        ssh_key=server.get("ssh_key"),
+        timeout=4.0,
+    )
+    try:
+        stdin, stdout, stderr = client.exec_command(INSPECTION_BASH_SCRIPT, timeout=5)
+        raw_out = stdout.read().decode("utf-8", errors="ignore")
+        return _parse_ssh_inspection_output(raw_out)
+    finally:
+        client.close()
+
+
+def _parse_ssh_inspection_output(raw: str) -> Dict[str, Any]:
+    sections: Dict[str, List[str]] = {}
+    current = None
+    for line in raw.splitlines():
+        line_str = line.strip()
+        if line_str.startswith("===") and line_str.endswith("==="):
+            current = line_str.strip("=")
+            sections[current] = []
+        elif current is not None and line_str:
+            sections[current].append(line_str)
+
+    # 1. Uptime
+    uptime_lines = sections.get("UPTIME", [])
+    uptime_str = uptime_lines[0] if uptime_lines else "Online"
+    uptime_seconds = 0.0
+    if len(uptime_lines) > 1:
+        try:
+            uptime_seconds = float(uptime_lines[1])
+            days = int(uptime_seconds // 86400)
+            hours = int((uptime_seconds % 86400) // 3600)
+            mins = int((uptime_seconds % 3600) // 60)
+            if days > 0:
+                uptime_str = f"{days}d {hours}h {mins}m"
+            elif hours > 0:
+                uptime_str = f"{hours}h {mins}m"
+            else:
+                uptime_str = f"{mins}m"
+        except ValueError:
+            pass
+
+    # 1b. Load Average (1m, 5m, 15m)
+    load_lines = sections.get("LOADAVG", [])
+    load_str = "0.00 / 0.00 / 0.00"
+    cpu_cores = 1
+    if load_lines:
+        parts = load_lines[0].split()
+        if len(parts) >= 3:
+            load_str = f"{parts[0]} / {parts[1]} / {parts[2]}"
+        if len(load_lines) > 1:
             try:
-                await check_thresholds()
-            except Exception as e:
-                print(f"[threshold_loop] {e}")
-            await asyncio.sleep(60)
+                cpu_cores = max(1, int(load_lines[1].strip()))
+            except ValueError:
+                cpu_cores = 1
 
-    # ───────────────────────── التقرير كل ساعة ─────────────────────────
-    async def send_text(settings, text):
-        results = []
-        async with httpx.AsyncClient(timeout=8.0) as client:
-            token = (settings.get("telegram_bot_token") or "").strip()
-            if settings.get("telegram_enabled", "0") != "1":
-                token = ""
-            if token.lower().startswith("bot") and ":" in token:
-                token = token[3:].strip()
-            chat_id = (settings.get("telegram_chat_id") or "").strip()
-            if token and chat_id:
+    # 2. Resources
+    res_lines = sections.get("RESOURCES", [])
+    cpu_pct = 0.0
+    ram_pct = 0.0
+    ram_detail = ""
+    disk_pct = 0.0
+    disk_detail = ""
+    for line in res_lines:
+        if "Cpu" in line or "id" in line:
+            m_idle = re.search(r"([0-9.]+)\s*%?\s*id", line)
+            if m_idle:
+                cpu_pct = round(max(0.0, 100.0 - float(m_idle.group(1))), 1)
+        elif re.match(r"^\d+\s+\d+\s+[0-9.]+$", line):
+            parts = line.split()
+            ram_detail = f"{parts[0]}MB / {parts[1]}MB"
+            ram_pct = float(parts[2])
+        elif "%" in line:
+            parts = line.split()
+            if len(parts) >= 3:
+                disk_detail = f"{parts[0]} / {parts[1]}"
                 try:
-                    r = await client.post(
-                        f"https://api.telegram.org/bot{token}/sendMessage",
-                        json={"chat_id": chat_id, "text": text},
-                    )
-                    results.append(f"telegram: {r.status_code} {r.text[:150]}")
-                except Exception as e:
-                    print(f"[report] telegram error: {e}")
-                    results.append(f"telegram error: {e}")
-            hook = (settings.get("slack_webhook_url") or "").strip()
-            if settings.get("slack_enabled", "0") != "1":
-                hook = ""
-            if hook:
-                try:
-                    r = await client.post(hook, json={"text": text})
-                    results.append(f"slack: {r.status_code}")
-                except Exception as e:
-                    print(f"[report] slack error: {e}")
-                    results.append(f"slack error: {e}")
-        return results
+                    disk_pct = float(parts[2].replace("%", ""))
+                except ValueError:
+                    pass
 
-    def build_report(row):
-        mail = json.loads(row["mail_stats_json"] or "{}")
-        status = row["status"] or "UNKNOWN"
-        icon = "🟢" if status == "UP" else ("🔴" if status == "DOWN" else "⚪")
-        has_metrics = bool(row["ssh_connected"])
-        if has_metrics:
-            cores = mail.get("cpu_cores") or "?"
-            load = f"{mail.get('load_str') or 'N/A'}  ({cores} cores)"
-            cpu = f"{row['cpu_usage']}%"
-            ram = f"{row['ram_usage']}%  ({row['ram_detail']})"
-            disk = f"{row['disk_usage']}%  ({row['disk_detail']})"
+    # 3. Services via systemd
+    ssh_services: Dict[str, str] = {}
+    for line in sections.get("SERVICES", []):
+        if ":" in line:
+            k, v = line.split(":", 1)
+            ssh_services[k.strip()] = v.strip()
+
+    # 4. Mail Queue & Stats
+    mta = "unknown"
+    queue_count = 0
+    for line in sections.get("MAIL_QUEUE", []):
+        if line.startswith("MTA:"):
+            mta = line.split(":", 1)[1].strip()
+        elif line.startswith("QUEUE:"):
+            try:
+                queue_count = int(re.sub(r"[^0-9]", "", line.split(":", 1)[1]) or "0")
+            except ValueError:
+                queue_count = 0
+
+    mail_stats = {
+        "mta": mta,
+        "queue_count": queue_count,
+        "sent_count": 0,
+        "deferred_count": 0,
+        "bounced_count": 0,
+        "rejected_spam_count": 0,
+        "auth_failures": 0,
+        "log_file": "",
+        "top_senders": [],
+    }
+    for line in sections.get("MAIL_STATS", []):
+        if ":" in line:
+            k, v = line.split(":", 1)
+            v = v.strip()
+            if k == "LOGFILE":
+                mail_stats["log_file"] = v
+            elif k == "SENT":
+                mail_stats["sent_count"] = int(re.sub(r"[^0-9]", "", v) or "0")
+            elif k == "DEFERRED":
+                mail_stats["deferred_count"] = int(re.sub(r"[^0-9]", "", v) or "0")
+            elif k == "BOUNCED":
+                mail_stats["bounced_count"] = int(re.sub(r"[^0-9]", "", v) or "0")
+            elif k == "REJECTED":
+                mail_stats["rejected_spam_count"] = int(re.sub(r"[^0-9]", "", v) or "0")
+            elif k == "AUTH_FAIL":
+                mail_stats["auth_failures"] = int(re.sub(r"[^0-9]", "", v) or "0")
+
+    for line in sections.get("TOP_SENDERS", []):
+        mail_stats["top_senders"].append(line)
+
+    return {
+        "ssh_connected": True,
+        "uptime_str": uptime_str,
+        "uptime_seconds": uptime_seconds,
+        "load_str": load_str,
+        "cpu_cores": cpu_cores,
+        "cpu_usage": cpu_pct,
+        "ram_usage": ram_pct,
+        "ram_detail": ram_detail,
+        "disk_usage": disk_pct,
+        "disk_detail": disk_detail,
+        "ssh_services": ssh_services,
+        "mail_stats": mail_stats,
+    }
+
+
+async def inspect_server(
+    server: Dict[str, Any],
+    run_rbl_check: bool = False,
+    previous_rbl: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Full inspection of a single server within the 5-second monitoring cycle.
+    Combines fast TCP port checks (Apache, DB, Mail, SSH) + optional SSH/Local deep metrics + RBL spam check.
+    """
+    ip = server["ip"].strip()
+    configured_ports = server.get("check_ports")
+    if isinstance(configured_ports, str):
+        try:
+            configured_ports = json.loads(configured_ports)
+        except Exception:
+            configured_ports = DEFAULT_SERVICE_PORTS
+    if not configured_ports:
+        configured_ports = DEFAULT_SERVICE_PORTS
+
+    # 1. Run all TCP port checks concurrently
+    port_tasks = [
+        check_tcp_port(ip, int(item["port"]), timeout=2.2)
+        for item in configured_ports
+    ]
+
+    # 2. If SSH credentials are provided (or if this is the local host), run deep inspection in parallel
+    has_ssh_creds = bool(
+        (server.get("ssh_password") and server.get("ssh_password").strip())
+        or (server.get("ssh_key") and server.get("ssh_key").strip())
+    )
+    loop = asyncio.get_running_loop()
+    if has_ssh_creds:
+        ssh_future = loop.run_in_executor(None, _ssh_deep_inspect_sync, server)
+    elif is_local_server_ip(ip):
+        ssh_future = loop.run_in_executor(None, _local_deep_inspect_sync)
+    else:
+        ssh_future = None
+
+    port_results = await asyncio.gather(*port_tasks, return_exceptions=True)
+
+    ssh_data: Dict[str, Any] = {"ssh_connected": False}
+    if ssh_future is not None:
+        try:
+            ssh_data = await asyncio.wait_for(ssh_future, timeout=4.5)
+        except Exception as e:
+            if is_local_server_ip(ip):
+                try:
+                    ssh_data = await loop.run_in_executor(None, _local_deep_inspect_sync)
+                except Exception:
+                    ssh_data = {"ssh_connected": False, "ssh_error": str(e)}
+            else:
+                ssh_data = {"ssh_connected": False, "ssh_error": str(e)}
+
+    # 3. Build unified services status list
+    services_list: List[Dict[str, Any]] = []
+    latencies: List[float] = []
+    ssh_svc_map: Dict[str, str] = ssh_data.get("ssh_services", {})
+
+    for idx, item in enumerate(configured_ports):
+        res = port_results[idx]
+        if isinstance(res, tuple):
+            is_up, lat_ms, detail = res
         else:
-            na = "غير متاح (أضف بيانات SSH للسيرفر)"
-            load = cpu = ram = disk = na
-        now = datetime.now()
-        return (
-            f"📊 تقرير الساعة — {row['name']}\n"
-            f"━━━━━━━━━━━━━━━━━━\n"
-            f"🌐 IP: {row['ip']}\n"
-            f"{icon} الحالة: {status}\n"
-            f"⏱ Uptime: {row['uptime_str']}  (24h: {row['uptime_24h']}%)\n"
-            f"⚙️ Load Avg: {load}\n"
-            f"🧮 CPU: {cpu}\n"
-            f"🧠 RAM: {ram}\n"
-            f"💽 Disk: {disk}\n"
-            f"📅 التاريخ: {now.strftime('%Y-%m-%d')}\n"
-            f"🕒 الوقت: {now.strftime('%H:%M:%S')}"
+            is_up, lat_ms, detail = False, 0.0, str(res)
+
+        if is_up and lat_ms > 0:
+            latencies.append(lat_ms)
+
+        services_list.append(
+            {
+                "key": item["key"],
+                "name": item["name"],
+                "category": item.get("category", "other"),
+                "port": int(item["port"]),
+                "status": "UP" if is_up else "DOWN",
+                "latency_ms": lat_ms,
+                "detail": detail,
+                "source": "TCP Port",
+            }
         )
 
-    async def send_reports():
-        conn = get_db()
-        rows = conn.execute(
-            """SELECT s.name, s.ip, st.*
-               FROM servers s JOIN server_state st ON s.id = st.server_id
-               ORDER BY s.name COLLATE NOCASE"""
-        ).fetchall()
-        conn.close()
-        settings = get_settings_dict()
-        log = []
-        for row in rows:
-            log.append({"server": row["name"], "results": await send_text(settings, build_report(row))})
-            await asyncio.sleep(1)  # علشان Telegram ما يعملش rate-limit
-        return log
+    # Enrich or append systemd services discovered via SSH
+    systemd_labels = {
+        "apache2": ("Apache Web Server (systemd)", "web"),
+        "httpd": ("Apache httpd (systemd)", "web"),
+        "lshttpd": ("LiteSpeed / OpenLiteSpeed (systemd)", "web"),
+        "nginx": ("Nginx Web Server (systemd)", "web"),
+        "mysql": ("MySQL Database (systemd)", "db"),
+        "mariadb": ("MariaDB Database (systemd)", "db"),
+        "postgresql": ("PostgreSQL Database (systemd)", "db"),
+        "redis": ("Redis Cache (systemd)", "db"),
+        "redis-server": ("Redis Server (systemd)", "db"),
+        "postfix": ("Postfix Mail MTA (systemd)", "mail"),
+        "exim4": ("Exim4 Mail MTA (systemd)", "mail"),
+        "exim": ("Exim Mail MTA (systemd)", "mail"),
+        "dovecot": ("Dovecot IMAP/POP3 (systemd)", "mail"),
+        "named": ("BIND DNS Server (systemd)", "system"),
+        "bind9": ("BIND9 DNS Server (systemd)", "system"),
+        "cpanel": ("cPanel / WHM Service (systemd)", "system"),
+        "fail2ban": ("Fail2ban Security (systemd)", "system"),
+        "cron": ("Cron Scheduler (systemd)", "system"),
+        "crond": ("Crond Scheduler (systemd)", "system"),
+    }
+    for svc_key, svc_state in ssh_svc_map.items():
+        is_active = svc_state in ("active", "running")
+        label, cat = systemd_labels.get(svc_key, (f"{svc_key} (systemd)", "system"))
+        services_list.append(
+            {
+                "key": f"systemd_{svc_key}",
+                "systemd_unit": svc_key,
+                "name": label,
+                "category": cat,
+                "port": 0,
+                "status": "UP" if is_active else "DOWN",
+                "latency_ms": 0.0,
+                "detail": f"systemctl: {svc_state}",
+                "source": "SSH / systemd",
+            }
+        )
 
-    async def report_loop():
-        await asyncio.sleep(60)  # أول تقرير بعد دقيقة من التشغيل
-        while True:
+    # 4. Determine overall server reachability & status
+    any_port_up = any(s["status"] == "UP" for s in services_list) or ssh_data.get("ssh_connected", False)
+    avg_ping_ms = round(sum(latencies) / len(latencies), 1) if latencies else 0.0
+
+    # 5. RBL / Blacklist check (runs periodically or on first check)
+    if run_rbl_check or not previous_rbl:
+        rbl_status = await check_ip_blacklists(ip)
+    else:
+        rbl_status = previous_rbl
+
+    # 6. Mail & Spam assessment
+    mail_port_up = any(
+        s["status"] == "UP" and s.get("category") == "mail" for s in services_list
+    )
+    mail_stats = ssh_data.get("mail_stats") or {
+        "mta": "SMTP Port Active" if mail_port_up else "Not Detected",
+        "queue_count": 0,
+        "sent_count": 0,
+        "deferred_count": 0,
+        "bounced_count": 0,
+        "rejected_spam_count": 0,
+        "auth_failures": 0,
+        "log_file": "Requires SSH for log parsing",
+        "top_senders": [],
+    }
+    mail_stats["smtp_reachable"] = mail_port_up
+
+    # Evaluate spam / sending warning flags
+    spam_warnings: List[str] = []
+    queue_limit = int(server.get("mail_queue_limit") or 100)
+    spam_threshold = int(server.get("spam_threshold") or 20)
+
+    if rbl_status.get("is_blacklisted"):
+        providers_str = ", ".join(rbl_status.get("listed_providers", []))
+        spam_warnings.append(f"الـ IP مدرج في قوائم الحظر (Blacklist): {providers_str}")
+
+    if mail_stats.get("queue_count", 0) >= queue_limit:
+        spam_warnings.append(
+            f"طابور الرسائل (Mail Queue) مرتفع جداً: {mail_stats['queue_count']} رسالة بالانتظار"
+        )
+
+    if mail_stats.get("bounced_count", 0) >= spam_threshold:
+        spam_warnings.append(
+            f"معدل ارتداد الرسائل (Bounced) مرتفع: {mail_stats['bounced_count']} رسالة مرتدة"
+        )
+
+    if mail_stats.get("rejected_spam_count", 0) >= spam_threshold:
+        spam_warnings.append(
+            f"تم رصد رسائل مرفوضة أو سبام (Rejected/Spam): {mail_stats['rejected_spam_count']} عملية"
+        )
+
+    if mail_stats.get("auth_failures", 0) >= 25:
+        spam_warnings.append(
+            f"محاولات اختراق SMTP (SASL Auth Failures): {mail_stats['auth_failures']} محاولة فاشلة"
+        )
+
+    mail_stats["has_spam_issue"] = len(spam_warnings) > 0
+    mail_stats["spam_warnings"] = spam_warnings
+    mail_stats["load_str"] = ssh_data.get("load_str", "")
+    mail_stats["cpu_cores"] = ssh_data.get("cpu_cores", 0)
+
+    overall_status = "UP" if any_port_up else "DOWN"
+
+    return {
+        "status": overall_status,
+        "ping_ms": avg_ping_ms,
+        "ssh_connected": ssh_data.get("ssh_connected", False),
+        "ssh_error": ssh_data.get("ssh_error", ""),
+        "uptime_str": ssh_data.get("uptime_str") or ("Online (TCP Active)" if overall_status == "UP" else "Offline (DOWN)"),
+        "load_str": ssh_data.get("load_str", ""),
+        "cpu_cores": ssh_data.get("cpu_cores", 0),
+        "cpu_usage": ssh_data.get("cpu_usage", 0.0),
+        "ram_usage": ssh_data.get("ram_usage", 0.0),
+        "ram_detail": ssh_data.get("ram_detail", ""),
+        "disk_usage": ssh_data.get("disk_usage", 0.0),
+        "disk_detail": ssh_data.get("disk_detail", ""),
+        "services": services_list,
+        "mail_stats": mail_stats,
+        "rbl_status": rbl_status,
+        "last_checked": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+    }
+
+
+def _fetch_remote_logs_sync(
+    server: Dict[str, Any], log_type: str = "mail", lines: int = 120
+) -> Dict[str, Any]:
+    """Fetch real-time logs over SSH (or locally if local host) for Mail, Apache/Web, Database, or System."""
+    has_ssh = bool(
+        (server.get("ssh_password") and server.get("ssh_password").strip())
+        or (server.get("ssh_key") and server.get("ssh_key").strip())
+    )
+    is_local = is_local_server_ip(server["ip"])
+
+    if not has_ssh and not is_local:
+        return {
+            "ok": False,
+            "source": "local_only",
+            "content": (
+                "⚠️ لعرض ملفات اللوج الداخلية مباشرة من السيرفر (/var/log/mail.log, apache2/error.log, mysql/error.log)، "
+                "يرجى إضافة بيانات الـ SSH (اسم المستخدم وكلمة المرور أو المفتاح) من زر تعديل السيرفر.\n\n"
+                "💡 بدون SSH، يمكنك متابعة 'سجل انقطاعات السيرفر والتنبيهات' في التبويب المخصص."
+            ),
+        }
+
+    lines = max(20, min(int(lines or 120), 500))
+    cmd_map = {
+        "mail": (
+            f"for f in /var/log/mail.log /var/log/maillog /var/log/exim4/mainlog /var/log/exim_mainlog; do "
+            f"if [ -r \"$f\" ]; then echo \"==> $f <==\"; tail -n {lines} \"$f\"; exit 0; fi; done; "
+            f"journalctl -u postfix -u exim4 -u dovecot --no-pager -n {lines} 2>/dev/null || echo 'No mail logs found'"
+        ),
+        "apache": (
+            f"for f in /var/log/apache2/error.log /var/log/httpd/error_log /var/log/nginx/error.log /var/log/apache2/access.log; do "
+            f"if [ -r \"$f\" ]; then echo \"==> $f <==\"; tail -n {lines} \"$f\"; fi; done | tail -n {lines}; "
+            f"journalctl -u apache2 -u httpd -u nginx --no-pager -n 40 2>/dev/null"
+        ),
+        "db": (
+            f"for f in /var/log/mysql/error.log /var/log/mysqld.log /var/log/mariadb/mariadb.log /var/log/postgresql/postgresql-*.log; do "
+            f"if [ -r \"$f\" ]; then echo \"==> $f <==\"; tail -n {lines} \"$f\"; exit 0; fi; done; "
+            f"journalctl -u mysql -u mariadb -u postgresql --no-pager -n {lines} 2>/dev/null"
+        ),
+        "system": (
+            f"for f in /var/log/syslog /var/log/messages /var/log/auth.log /var/log/secure; do "
+            f"if [ -r \"$f\" ]; then echo \"==> $f <==\"; tail -n {lines // 2} \"$f\"; fi; done; "
+            f"journalctl --no-pager -n 50 2>/dev/null"
+        ),
+        "queue": (
+            "echo '=== Mail Queue Details ==='; "
+            "if command -v postqueue >/dev/null 2>&1; then postqueue -p | head -n 150; "
+            "elif command -v exim >/dev/null 2>&1; then exim -bp | head -n 150; "
+            "else mailq | head -n 150; fi"
+        ),
+    }
+    cmd = cmd_map.get(log_type, cmd_map["system"])
+
+    if not has_ssh and is_local:
+        res = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True, timeout=6)
+        out = (res.stdout + res.stderr).strip()
+        return {
+            "ok": True,
+            "source": f"Local Server ({server['ip']})",
+            "content": out or "No log entries found.",
+        }
+
+    client = _create_ssh_client(
+        ip=server["ip"],
+        ssh_port=server.get("ssh_port", 22),
+        ssh_user=server.get("ssh_user", "root"),
+        ssh_password=server.get("ssh_password"),
+        ssh_key=server.get("ssh_key"),
+        timeout=5.0,
+    )
+    try:
+        _, stdout, stderr = client.exec_command(cmd, timeout=6)
+        out = stdout.read().decode("utf-8", errors="ignore").strip()
+        err = stderr.read().decode("utf-8", errors="ignore").strip()
+        return {
+            "ok": True,
+            "source": f"SSH ({server['ip']})",
+            "content": out or err or "لا توجد سجلات حالياً.",
+        }
+    finally:
+        client.close()
+
+
+async def fetch_remote_logs(
+    server: Dict[str, Any], log_type: str = "mail", lines: int = 120
+) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _fetch_remote_logs_sync, server, log_type, lines)
+    except Exception as e:
+        return {
+            "ok": False,
+            "source": "ssh_error",
+            "content": f"❌ تعذر الاتصال بالسيرفر عبر SSH لجلب اللوجات:\n{e}",
+        }
+
+
+def _service_action_sync(server: Dict[str, Any], service_name: str, action: str) -> Dict[str, Any]:
+    allowed_actions = {"restart", "start", "stop", "flush_queue", "clear_deferred"}
+    if action not in allowed_actions:
+        return {"ok": False, "message": "عملية غير مسموحة"}
+
+    client = _create_ssh_client(
+        ip=server["ip"],
+        ssh_port=server.get("ssh_port", 22),
+        ssh_user=server.get("ssh_user", "root"),
+        ssh_password=server.get("ssh_password"),
+        ssh_key=server.get("ssh_key"),
+        timeout=5.0,
+    )
+    try:
+        if action == "flush_queue":
+            cmd = "postqueue -f 2>&1 || exim -qff 2>&1 || sendmail -q 2>&1"
+        elif action == "clear_deferred":
+            cmd = "postsuper -d ALL deferred 2>&1 || exiqgrep -z -i | xargs -r exim -Mrm 2>&1"
+        else:
+            clean_svc = re.sub(r"[^a-zA-Z0-9_.-]", "", service_name.replace("systemd_", ""))
+            cmd = f"systemctl {action} {clean_svc} 2>&1 || service {clean_svc} {action} 2>&1"
+
+        _, stdout, stderr = client.exec_command(cmd, timeout=8)
+        out = (stdout.read() + stderr.read()).decode("utf-8", errors="ignore").strip()
+        return {"ok": True, "message": out or f"تم تنفيذ العملية ({action}) بنجاح ✅"}
+    finally:
+        client.close()
+
+
+async def execute_service_action(
+    server: Dict[str, Any], service_name: str, action: str = "restart"
+) -> Dict[str, Any]:
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, _service_action_sync, server, service_name, action)
+    except Exception as e:
+        return {"ok": False, "message": f"خطأ أثناء تنفيذ الأمر عبر SSH: {e}"}
+
+
+async def send_alerts(
+    settings: Dict[str, Any],
+    title: str,
+    server_name: str,
+    server_ip: str,
+    severity: str,
+    service_name: str,
+    details: str,
+    extra_stats: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    Sends instant (<1s) alerts to Telegram and Slack when a server or service changes state
+    or when Spam / Blacklist is detected.
+    """
+    now_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    icon = "🚨" if severity == "CRITICAL" else ("⚠️" if severity == "WARNING" else "✅")
+
+    stats_block = ""
+    if extra_stats:
+        stats_lines = [f"• {k}: {v}" for k, v in extra_stats.items()]
+        stats_block = "\n📊 *إحصائيات السيرفر الحالية:*\n" + "\n".join(stats_lines)
+
+    message_text = (
+        f"{icon} *{title}*\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"🖥️ *السيرفر:* `{server_name}`\n"
+        f"🌐 *الـ IP:* `{server_ip}`\n"
+        f"⚙️ *الخدمة / الفحص:* `{service_name}`\n"
+        f"📝 *التفاصيل:* {details}"
+        f"{stats_block}\n"
+        f"🕒 *الوقت:* `{now_str}`\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"⚡ *Developed by Eng. Samir Abo El-Khair | Version 3.5*"
+    )
+
+    results = {"telegram": None, "slack": None}
+
+    async with httpx.AsyncClient(timeout=6.0) as client:
+        # 1. Telegram Notification
+        bot_token = (settings.get("telegram_bot_token") or "").strip()
+        if bot_token.lower().startswith("bot") and ":" in bot_token:
+            bot_token = bot_token[3:].strip()
+        chat_id = (settings.get("telegram_chat_id") or "").strip()
+        tg_enabled = str(settings.get("telegram_enabled", "0")) == "1" or bool(bot_token)
+
+        if tg_enabled and bot_token:
+            if not chat_id:
+                try:
+                    upd = await client.get(f"https://api.telegram.org/bot{bot_token}/getUpdates")
+                    for item in reversed(upd.json().get("result") or []):
+                        msg_obj = item.get("message") or item.get("channel_post") or {}
+                        cid = (msg_obj.get("chat") or {}).get("id")
+                        if cid:
+                            chat_id = str(cid)
+                            break
+                except Exception:
+                    pass
+
+            if not chat_id:
+                results["telegram"] = "Missing Chat ID (أرسل /start للبوت أو أدخل الـ Chat ID)"
+            else:
+                tg_url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
+                try:
+                    resp = await client.post(
+                        tg_url,
+                        json={
+                            "chat_id": chat_id,
+                            "text": message_text,
+                            "parse_mode": "Markdown",
+                        },
+                    )
+                    if resp.status_code == 200:
+                        results["telegram"] = True
+                    else:
+                        err_desc = resp.json().get("description", resp.text)
+                        results["telegram"] = f"Telegram Error ({resp.status_code}): {err_desc}"
+                except Exception as e:
+                    results["telegram"] = f"Connection Error: {e}"
+
+        # 2. Slack Notification
+        webhook_url = (settings.get("slack_webhook_url") or "").strip()
+        slack_enabled = str(settings.get("slack_enabled", "0")) == "1" or bool(webhook_url)
+        if slack_enabled and webhook_url:
             try:
-                await send_reports()
+                resp = await client.post(
+                    webhook_url,
+                    json={"text": message_text},
+                )
+                if resp.status_code in (200, 204):
+                    results["slack"] = True
+                else:
+                    results["slack"] = f"Slack Error ({resp.status_code}): {resp.text[:80]}"
             except Exception as e:
-                print(f"[report_loop] {e}")
-            await asyncio.sleep(REPORT_EVERY_SEC)
+                results["slack"] = f"Connection Error: {e}"
 
-    # اختبار يدوي: افتح الرابط في المتصفح /api/reports/send-now
-    @app.api_route("/api/reports/send-now", methods=["GET", "POST"])
-    async def reports_send_now():
-        log = await send_reports()
-        if not log:
-            return {"ok": False, "message": "مفيش سيرفرات مضافة"}
-        sent = any(r["results"] for r in log)
-        msg = "اتبعتت" if sent else "ما اتبعتش: فعّل Telegram أو Slack من الإعدادات واكتب Token و Chat ID"
-        return {"ok": sent, "message": msg, "details": log}
-
-    def start():
-        init_tables()
-        coros = [aggregate_loop(), threshold_loop()]
-        if REPORTS_ENABLED:
-            coros.append(report_loop())
-        return coros
-
-    return start
+    return results
