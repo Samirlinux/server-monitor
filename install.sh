@@ -2,7 +2,7 @@
 set -e
 
 echo "======================================================"
-echo "🚀 Linux Server, Uptime & Mail Monitor — Version 1.0"
+echo "🚀 Linux Server, Uptime & Mail Monitor — Version 3.5"
 echo "👨‍💻 Developed by Eng. Samir Abo El-Khair"
 echo "======================================================"
 
