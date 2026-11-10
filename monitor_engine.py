@@ -823,7 +823,7 @@ async def send_alerts(
         f"{stats_block}\n"
         f"🕒 *الوقت:* `{now_str}`\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"⚡ *Developed by Eng. Samir Abo El-Khair | Version 1.0*"
+        f"⚡ *Developed by Eng. Samir Abo El-Khair | Version 3.5*"
     )
 
     results = {"telegram": None, "slack": None}
