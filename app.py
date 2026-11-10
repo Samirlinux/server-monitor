@@ -415,7 +415,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Linux Server & Mail Uptime Monitor — Developed by Eng. Samir Abo El-Khair",
-    version="1.0.0",
+    version="3.5.0",
     lifespan=lifespan,
 )
 
