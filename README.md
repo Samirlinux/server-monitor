@@ -1,8 +1,8 @@
-# ⚡ Linux Server, Uptime, Services & Mail/Spam Monitor — Version 1.0
+# ⚡ Linux Server, Uptime, Services & Mail/Spam Monitor — Version 3.5
 
-> **Developed & Engineered by Eng. Samir Abo El-Khair | Version 1.0**
+> **Developed & Engineered by Eng. Samir Abo El-Khair | Version 3.5**
 
-![Version](https://img.shields.io/badge/Version-1.0-10b981)
+![Version](https://img.shields.io/badge/Version-3.5-10b981)
 ![Author](https://img.shields.io/badge/Developer-Eng._Samir_Abo_El--Khair-0ea5e9)
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python)
 ![FastAPI](https://img.shields.io/badge/FastAPI-RealTime_5s-009688?logo=fastapi)
@@ -53,5 +53,5 @@ docker compose up -d --build
 ---
 
 ## 👨‍💻 Author & Credits
-**Developed & Engineered by Eng. Samir Abo El-Khair — Version 1.0**
+**Developed & Engineered by Eng. Samir Abo El-Khair — Version 3.5**
 

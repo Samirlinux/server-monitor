@@ -62,9 +62,10 @@ def svc_alert_enabled(svc, prefs):
 PANEL_INNER = r"""
 <div id="sx-body" style="font-size:14px;color:#1f2933">
   <div style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:12px">
-    <a href="/status" target="_blank" style="color:#2563eb">🌐 صفحة الاب تايم</a>
-    <a href="/tasks" target="_blank" style="color:#2563eb">📋 التاسكات</a>
-    <a href="/tasks/report" target="_blank" style="color:#2563eb">📊 تقرير الشركات</a>
+    <a href="/status" target="_blank" style="color:#2563eb;font-weight:700">🌐 صفحة الاب تايم</a>
+    <a href="/tasks" target="_blank" style="color:#2563eb;font-weight:700">📋 التاسكات</a>
+    <a href="/tasks/report" target="_blank" style="color:#2563eb;font-weight:700">📊 تقرير الشركات</a>
+    <a href="/billing" target="_blank" style="color:#15803d;font-weight:700">💰 الحسابات والفواتير</a>
   </div>
 
   <div style="font-weight:700;margin-bottom:4px">1) السيرفرات الظاهرة في صفحة الاب تايم</div>
@@ -228,7 +229,7 @@ def register(app, get_db, get_settings_dict, base_dir):
         path = os.path.join(base_dir, "status.html")
         with open(path, "r", encoding="utf-8") as f:
             html = f.read().replace("__STATUS_TITLE__", STATUS_TITLE)
-        return HTMLResponse(html)
+        return HTMLResponse(html, headers={"Cache-Control": "no-store, no-cache, must-revalidate, max-age=0"})
 
     def _pct(up, total):
         return None if not total else round(up * 100.0 / total, 2)
@@ -501,7 +502,9 @@ def register(app, get_db, get_settings_dict, base_dir):
             f"🧠 RAM: {ram}\n"
             f"💽 Disk: {disk}\n"
             f"📅 التاريخ: {now.strftime('%Y-%m-%d')}\n"
-            f"🕒 الوقت: {now.strftime('%H:%M:%S')}"
+            f"🕒 الوقت: {now.strftime('%H:%M:%S')}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"⚡ Developed by Eng. Samir Abo El-Khair | Version 3.5"
         )
 
     async def send_reports():

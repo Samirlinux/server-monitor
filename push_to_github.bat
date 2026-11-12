@@ -3,7 +3,7 @@ chcp 65001 >nul
 cd /d "%~dp0"
 
 echo ======================================================
-echo   Pushing Server Monitor v1.0 to GitHub:
+echo   Pushing Server Monitor v3.5 to GitHub:
 echo   https://github.com/Samirlinux/server-monitor.git
 echo ======================================================
 echo.
@@ -17,7 +17,7 @@ git config user.name "Eng. Samir Abo El-Khair"
 git config user.email "samirlinux@users.noreply.github.com"
 
 git add .
-git commit -m "Release v1.0: Linux Server, Uptime & Mail Monitor by Eng. Samir Abo El-Khair"
+git commit -m "Release v3.5: Linux Server, Uptime & Mail Monitor by Eng. Samir Abo El-Khair"
 
 git remote remove origin 2>nul
 git remote add origin https://github.com/Samirlinux/server-monitor.git

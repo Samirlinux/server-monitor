@@ -293,7 +293,7 @@ TASKS_HTML = """<!DOCTYPE html>
 <div class="wrap">
   <div class="top">
     <h1>📋 التاسكات</h1>
-    <div><a href="/tasks/report">📊 تقرير الشركات</a> &nbsp;|&nbsp; <a href="/">لوحة المراقبة</a> &nbsp;|&nbsp; <a href="/status">صفحة الحالة</a></div>
+    <div><a href="/billing">💰 الحسابات والفواتير</a> &nbsp;|&nbsp; <a href="/tasks/report">📊 تقرير الشركات</a> &nbsp;|&nbsp; <a href="/">لوحة المراقبة</a> &nbsp;|&nbsp; <a href="/status">صفحة الحالة</a></div>
   </div>
 
   <div class="stats">
@@ -340,6 +340,7 @@ TASKS_HTML = """<!DOCTYPE html>
   </div>
 
   <div id="list"></div>
+  <div style="text-align:center;color:var(--muted);font-size:12px;margin-top:24px">Developed by <strong>Eng. Samir Abo El-Khair</strong> — <span style="padding:2px 8px;border-radius:6px;background:rgba(22,163,74,.15);color:#16a34a;font-family:monospace;font-weight:700">Version 3.5</span></div>
 </div>
 
 <script>
@@ -541,6 +542,7 @@ REPORT_HTML = """<!DOCTYPE html>
 
   <div class="head-print"><h2 id="printTitle">تقرير التاسكات</h2><div id="printSub"></div></div>
   <div id="out"></div>
+  <div style="text-align:center;color:var(--muted);font-size:12px;margin-top:24px">Developed by <strong>Eng. Samir Abo El-Khair</strong> — <span style="padding:2px 8px;border-radius:6px;background:rgba(22,163,74,.15);color:#16a34a;font-family:monospace;font-weight:700">Version 3.5</span></div>
 </div>
 
 <script>
