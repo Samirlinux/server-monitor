@@ -451,6 +451,10 @@ class ServerPayload(BaseModel):
     mail_queue_limit: int = 100
     spam_threshold: int = 20
     selected_ports: Optional[List[int]] = None
+    # الفحوصات الإضافية (Ping / Port / HTTP / Keyword) - بتيجي من قسم الفحوصات في نافذة السيرفر
+    extra_checks_add: Optional[List[Dict[str, Any]]] = None
+    extra_checks_remove: Optional[List[str]] = None
+    windows_mode: Optional[bool] = None
 
 
 class ServiceActionPayload(BaseModel):
@@ -477,7 +481,8 @@ async def dashboard_page(request: Request):
     html = resp.body.decode("utf-8")
     # زر عائم لإدارة السيرفرات الظاهرة في صفحة الاب تايم + روابط التاسكات
     idx = html.lower().rfind("</body>")
-    html = (html[:idx] + extras.DASHBOARD_WIDGET + html[idx:]) if idx != -1 else html + extras.DASHBOARD_WIDGET
+    extra_ui = extras.DASHBOARD_WIDGET + (checks.MODAL_SCRIPT if checks else "")
+    html = (html[:idx] + extra_ui + html[idx:]) if idx != -1 else html + extra_ui
     return HTMLResponse(html)
 
 
@@ -642,6 +647,12 @@ async def api_server_detail(server_id: int):
 
 @app.post("/api/servers")
 async def api_add_server(payload: ServerPayload):
+    new_checks = []
+    if checks:
+        try:
+            new_checks = checks.validate_adds(payload.extra_checks_add)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     ports_cfg = DEFAULT_SERVICE_PORTS
     if payload.selected_ports:
         ports_cfg = [
@@ -673,6 +684,8 @@ async def api_add_server(payload: ServerPayload):
     )
     server_id = cur.lastrowid
     conn.commit()
+    if checks:
+        checks.apply_server_checks(get_db, server_id, new_checks, None, payload.windows_mode)
     srv_row = dict(conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone())
     conn.close()
 
@@ -683,6 +696,12 @@ async def api_add_server(payload: ServerPayload):
 
 @app.put("/api/servers/{server_id}")
 async def api_update_server(server_id: int, payload: ServerPayload):
+    new_checks = []
+    if checks:
+        try:
+            new_checks = checks.validate_adds(payload.extra_checks_add)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
     conn = get_db()
     existing = conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone()
     if not existing:
@@ -720,6 +739,8 @@ async def api_update_server(server_id: int, payload: ServerPayload):
         ),
     )
     conn.commit()
+    if checks:
+        checks.apply_server_checks(get_db, server_id, new_checks, payload.extra_checks_remove, payload.windows_mode)
     srv_row = dict(conn.execute("SELECT * FROM servers WHERE id = ?", (server_id,)).fetchone())
     conn.close()
 

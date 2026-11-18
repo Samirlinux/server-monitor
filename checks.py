@@ -100,6 +100,49 @@ def clean_check(b):
     return chk
 
 
+def validate_adds(adds):
+    """بيتحقق من قايمة الفحوصات الجديدة اللي جاية مع حفظ السيرفر. بيرفع ValueError(code) لو فيها غلط."""
+    out = []
+    for a in (adds or [])[:20]:
+        if not isinstance(a, dict):
+            raise ValueError("bad_type")
+        out.append(clean_check(a))
+    return out
+
+
+def apply_server_checks(get_db, server_id, adds, removes, windows):
+    """بيطبّق (إضافة / حذف / وضع ويندوز) على سيرفر. adds لازم تكون اتنضفت بـ validate_adds."""
+    if not adds and not removes and windows is None:
+        return
+    ensure_schema(get_db)
+    conn = get_db()
+    try:
+        row = conn.execute("SELECT extra_checks FROM servers WHERE id = ?", (server_id,)).fetchone()
+        if not row:
+            return
+        try:
+            lst = json.loads(row["extra_checks"] or "[]")
+        except Exception:
+            lst = []
+        if removes:
+            rm = set(str(x) for x in removes)
+            lst = [c for c in lst if str(c.get("id")) not in rm]
+            for x in rm:
+                _state.pop((server_id, x), None)
+        for c in adds or []:
+            if len(lst) >= 20:
+                break
+            c = dict(c)
+            c["id"] = uuid.uuid4().hex[:8]
+            lst.append(c)
+        conn.execute("UPDATE servers SET extra_checks = ? WHERE id = ?", (json.dumps(lst, ensure_ascii=False), server_id))
+        if windows is not None:
+            conn.execute("UPDATE servers SET windows_mode = ? WHERE id = ?", (1 if windows else 0, server_id))
+        conn.commit()
+    finally:
+        conn.close()
+
+
 # ───────────────────────── تنفيذ الفحوصات ─────────────────────────
 def status_ok(code, expect):
     expect = (expect or "200-399").replace(" ", "")
@@ -579,20 +622,268 @@ def register(app, get_db):
         b = await request.json()
         ensure_schema(get_db)
         try:
-            sid = int(b.get("server_id"))
-        except (TypeError, ValueError):
-            return _err("bad_server")
-        try:
             chk = clean_check(b)
         except ValueError as e:
             return _err(str(e))
-        conn = get_db()
-        row = conn.execute("SELECT id, ip FROM servers WHERE id = ?", (sid,)).fetchone()
-        conn.close()
-        if not row:
-            return _err("not_found", 404)
+        target = None
+        if b.get("server_id") not in (None, ""):
+            try:
+                conn = get_db()
+                row = conn.execute("SELECT id, ip FROM servers WHERE id = ?", (int(b.get("server_id")),)).fetchone()
+                conn.close()
+            except (TypeError, ValueError):
+                return _err("bad_server")
+            if row:
+                target = {"id": row["id"], "ip": row["ip"]}
+        if target is None and str(b.get("ip") or "").strip():
+            target = {"id": 0, "ip": str(b.get("ip")).strip()}   # سيرفر جديد لسه ما اتحفظش
+        if target is None:
+            if chk["type"] in ("ping", "port"):
+                return _err("bad_server")
+            target = {"id": 0, "ip": ""}
         try:
-            ok, ms, detail = await _run_once({"id": row["id"], "ip": row["ip"]}, chk)
+            ok, ms, detail = await _run_once(target, chk)
         except Exception as e:
             ok, ms, detail = False, 0.0, f"error: {e}"
         return {"ok": bool(ok), "latency_ms": ms, "detail": detail}
+
+
+# سكريبت بيضيف قسم "الفحوصات الإضافية" جوه نافذة إضافة/تعديل السيرفر في اللوحة (بيتحقن من app.py)
+MODAL_SCRIPT = "<script>" + r"""
+(function () {
+  if (window.__mxInit) return;
+  window.__mxInit = true;
+  var S = { sid: null, windows: false, wdirty: false, loaded: [], removed: [], added: [], servers: [], serversAt: 0, lastKey: '', wasVisible: false, forceVisible: false };
+
+  function $(id) { return document.getElementById(id); }
+  function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+  function visible(el) { return !!(el && (el.offsetWidth || el.offsetHeight || (el.getClientRects && el.getClientRects().length))); }
+
+  // ---------- يدوّر على نافذة إضافة/تعديل السيرفر (من خانة SSH Private Key وزر Save) ----------
+  function findNodes() {
+    var key = document.querySelector('textarea[placeholder*="OPENSSH"]');
+    if (!key) return null;
+    var form = key.parentElement, save = null;
+    while (form) {
+      var btns = form.querySelectorAll('button');
+      for (var i = 0; i < btns.length; i++) {
+        if (/Save|\u062d\u0641\u0638/.test(btns[i].textContent || '')) { save = btns[i]; break; }
+      }
+      if (save) break;
+      form = form.parentElement;
+    }
+    if (!form || !save) return null;
+    return { form: form, save: save, name: form.querySelector('input[placeholder*="Main Web"]'), ip: form.querySelector('input[placeholder*="192.168"]') };
+  }
+  function modalVisible() {
+    if (S.forceVisible) return true;
+    var n = findNodes();
+    return !!(n && visible(n.form));
+  }
+
+  // ---------- منطق صافي (بيتختبر لوحده) ----------
+  function matchServer(servers, ip, name) {
+    ip = String(ip || '').trim().toLowerCase();
+    name = String(name || '').trim().toLowerCase();
+    for (var i = 0; i < servers.length; i++) {
+      if (String(servers[i].ip || '').trim().toLowerCase() === ip && String(servers[i].name || '').trim().toLowerCase() === name) return servers[i];
+    }
+    return null;
+  }
+  function adjustBody(method, id, body) {
+    var full = (method === 'POST') || (S.sid !== null && S.sid === id);
+    if (S.added.length) body.extra_checks_add = S.added;
+    if (full) {
+      if (S.removed.length) body.extra_checks_remove = S.removed;
+      if (method === 'POST') { if (S.windows) body.windows_mode = true; }
+      else if (S.wdirty) body.windows_mode = !!S.windows;
+    }
+    return body;
+  }
+  function resetState() {
+    S.sid = null; S.windows = false; S.wdirty = false; S.loaded = []; S.removed = []; S.added = []; S.lastKey = '';
+    render();
+  }
+
+  // ---------- الواجهة ----------
+  var IN = 'width:100%;padding:7px 9px;border:1px solid #cbd5e1;border-radius:8px;box-sizing:border-box;font:inherit;background:#fff;color:#1f2933';
+  var LB = 'display:block;font-size:12px;color:#6b7785;margin:8px 0 3px';
+  var BT = 'border:0;border-radius:8px;padding:7px 14px;cursor:pointer;font:inherit;font-size:13px;color:#fff;';
+  function sectionHtml() {
+    return '<div style="border:1px solid #86efac;border-radius:10px;padding:14px;margin:14px 0;background:#f0fdf4;color:#1f2933;font-size:14px;text-align:start">' +
+      '<div style="font-weight:700;margin-bottom:6px">الفحوصات الإضافية <span style="font-weight:400;color:#6b7785">(Ping / Port / HTTP / Keyword)</span></div>' +
+      '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin:6px 0"><input type="checkbox" id="mx-win" style="width:auto"> سيرفر ويندوز (من غير بورتات لينكس الافتراضية؛ لو ما أضفتش فحوصات بيستخدم Ping)</label>' +
+      '<div id="mx-list"></div>' +
+      '<details style="margin-top:8px"><summary style="cursor:pointer;color:#15803d;font-weight:600">+ إضافة فحص</summary>' +
+        '<div style="display:grid;grid-template-columns:1fr 1fr;gap:10px">' +
+          '<div><label style="' + LB + '">النوع / Type</label><select id="mx-type" style="' + IN + '"><option value="ping">Ping (بينج)</option><option value="port">Port (منفذ)</option><option value="http">HTTP / موقع</option><option value="keyword">Keyword (كلمة في الموقع)</option></select></div>' +
+          '<div><label style="' + LB + '">الاسم / Name</label><input id="mx-name" style="' + IN + '" placeholder="اختياري"></div>' +
+          '<div class="mx-f-port" style="display:none"><label style="' + LB + '">المنفذ / Port</label><input id="mx-port" type="number" style="' + IN + '" placeholder="3389"></div>' +
+          '<div class="mx-f-url" style="display:none"><label style="' + LB + '">الرابط / URL</label><input id="mx-url" style="' + IN + '" placeholder="https://example.com/"></div>' +
+          '<div class="mx-f-http" style="display:none"><label style="' + LB + '">الرد المتوقع / Expected status</label><input id="mx-expect" style="' + IN + '" placeholder="200-399"></div>' +
+          '<div class="mx-f-kw" style="display:none"><label style="' + LB + '">الكلمة / Keyword</label><input id="mx-kw" style="' + IN + '"></div>' +
+          '<div class="mx-f-kw" style="display:none"><label style="' + LB + '">الوضع / Mode</label><select id="mx-mode" style="' + IN + '"><option value="exists">لازم تكون موجودة</option><option value="absent">لازم تكون مش موجودة</option></select></div>' +
+        '</div>' +
+        '<label class="mx-f-url" style="display:none;align-items:center;gap:8px;margin:8px 0"><input type="checkbox" id="mx-ssl" checked style="width:auto"> تحقق من شهادة SSL</label>' +
+        '<label class="mx-f-kw" style="display:none;align-items:center;gap:8px;margin:8px 0"><input type="checkbox" id="mx-case" style="width:auto"> حساس لحالة الحروف</label>' +
+        '<div style="margin-top:10px;display:flex;gap:8px;flex-wrap:wrap"><button type="button" data-mx="test" style="' + BT + 'background:#64748b">جرّب الآن / Test</button><button type="button" data-mx="add" style="' + BT + 'background:#16a34a">أضف للقائمة</button></div>' +
+        '<div id="mx-msg" style="font-size:13px;margin-top:8px"></div>' +
+      '</details>' +
+      '<div style="font-size:12px;color:#6b7785;margin-top:8px">الفحوصات بتتحفظ لما تضغط <b>Save / حفظ</b> تحت.</div>' +
+    '</div>';
+  }
+  function typeLabel(t) { return {ping: 'Ping', port: 'Port', http: 'HTTP', keyword: 'Keyword'}[t] || t; }
+  function target(c) {
+    if (c.type === 'port') return 'Port ' + c.port;
+    if (c.type === 'ping') return 'ICMP';
+    if (c.type === 'http') return c.url;
+    return c.url + ' \u2192 ' + (c.mode === 'absent' ? 'ممنوع تظهر' : 'لازم تظهر') + ' "' + c.keyword + '"';
+  }
+  function rowHtml(c, kind, ref) {
+    var dot = '';
+    if (kind === 'old' && c.result) dot = '<span style="display:inline-block;width:9px;height:9px;border-radius:50%;margin-inline-end:6px;background:' + (c.result.status === 'UP' ? '#16a34a' : '#dc2626') + '"></span>';
+    return '<div style="display:flex;align-items:center;gap:8px;padding:7px 0;border-bottom:1px solid #d1fae5;flex-wrap:wrap">' +
+      '<div style="flex:1;min-width:180px">' + dot + '<b>' + esc(c.name || typeLabel(c.type)) + '</b> <span style="font-size:11px;background:#dcfce7;border-radius:999px;padding:1px 8px">' + esc(typeLabel(c.type)) + '</span>' +
+      (kind === 'new' ? ' <span style="font-size:11px;color:#b45309">(جديد - لسه ما اتحفظش)</span>' : '') +
+      '<div style="font-size:12px;color:#6b7785;word-break:break-all">' + esc(target(c)) + '</div></div>' +
+      '<button type="button" data-mx="' + (kind === 'old' ? 'del-old' : 'del-new') + '" data-ref="' + esc(ref) + '" style="' + BT + 'background:#dc2626;padding:4px 10px">حذف</button></div>';
+  }
+  function render() {
+    var list = $('mx-list');
+    if (!list) return;
+    var rows = '', i;
+    for (i = 0; i < S.loaded.length; i++) { if (S.removed.indexOf(S.loaded[i].id) < 0) rows += rowHtml(S.loaded[i], 'old', S.loaded[i].id); }
+    for (i = 0; i < S.added.length; i++) rows += rowHtml(S.added[i], 'new', String(i));
+    list.innerHTML = rows || '<div style="color:#6b7785;font-size:13px;margin:6px 0">لا توجد فحوصات إضافية.</div>';
+    var w = $('mx-win'); if (w) w.checked = !!S.windows;
+  }
+  function toggleFields(sec) {
+    var t = $('mx-type').value;
+    var show = function (cls, on, disp) { var n = sec.querySelectorAll(cls); for (var i = 0; i < n.length; i++) n[i].style.display = on ? (disp || '') : 'none'; };
+    show('div.mx-f-port', t === 'port'); show('div.mx-f-url', t === 'http' || t === 'keyword'); show('div.mx-f-http', t === 'http' || t === 'keyword'); show('div.mx-f-kw', t === 'keyword');
+    show('label.mx-f-url', t === 'http' || t === 'keyword', 'flex'); show('label.mx-f-kw', t === 'keyword', 'flex');
+  }
+  function readForm() {
+    var t = $('mx-type').value, o = { type: t, name: $('mx-name').value.trim() };
+    if (t === 'port') o.port = $('mx-port').value.trim();
+    if (t === 'http' || t === 'keyword') { o.url = $('mx-url').value.trim(); o.expect = $('mx-expect').value.trim(); o.verify_ssl = $('mx-ssl').checked; }
+    if (t === 'keyword') { o.keyword = $('mx-kw').value.trim(); o.mode = $('mx-mode').value; o.case_sensitive = $('mx-case').checked; }
+    return o;
+  }
+  function problem(o) {
+    if (o.type === 'port') { var p = parseInt(o.port, 10); if (!(p >= 1 && p <= 65535)) return 'المنفذ غير صحيح (1-65535)'; }
+    if ((o.type === 'http' || o.type === 'keyword') && !/^https?:\/\/[^\s\/]+/i.test(o.url)) return 'الرابط لازم يبدأ بـ http:// أو https://';
+    if (o.type === 'keyword' && !o.keyword) return 'اكتب الكلمة المطلوبة';
+    return '';
+  }
+  function msg(text, ok) { var m = $('mx-msg'); if (m) { m.style.color = ok ? '#15803d' : '#b91c1c'; m.textContent = text; } }
+
+  function bind(sec) {
+    sec.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.keyCode === 13) { e.preventDefault(); e.stopPropagation(); }  // ما نخليش Enter يحفظ السيرفر
+    });
+    sec.addEventListener('change', function (e) {
+      var t = e.target;
+      if (t.id === 'mx-type') toggleFields(sec);
+      if (t.id === 'mx-win') { S.windows = t.checked; S.wdirty = true; }
+    });
+    sec.addEventListener('click', function (e) {
+      var t = e.target, act = t.getAttribute && t.getAttribute('data-mx');
+      if (!act) return;
+      e.preventDefault();
+      if (act === 'del-old') { var id = t.getAttribute('data-ref'); if (S.removed.indexOf(id) < 0) S.removed.push(id); render(); }
+      else if (act === 'del-new') { S.added.splice(parseInt(t.getAttribute('data-ref'), 10), 1); render(); }
+      else if (act === 'add') {
+        var o = readForm(), pr = problem(o);
+        if (pr) { msg(pr, false); return; }
+        S.added.push(o); render(); msg('اتضاف للقائمة. اضغط Save / حفظ عشان يتحفظ.', true);
+        $('mx-name').value = ''; $('mx-port').value = ''; $('mx-url').value = ''; $('mx-kw').value = '';
+      }
+      else if (act === 'test') {
+        var o2 = readForm(), pr2 = problem(o2), n = findNodes();
+        if (pr2) { msg(pr2, false); return; }
+        o2.ip = n && n.ip ? n.ip.value.trim() : ''; if (S.sid !== null) o2.server_id = S.sid;
+        msg('...', true);
+        fetch('/api/server-checks/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(o2), credentials: 'same-origin' })
+          .then(function (r) { return r.json().then(function (j) { if (!r.ok) throw new Error(j.detail || 'error'); return j; }); })
+          .then(function (j) { msg((j.ok ? '\u2714 شغال - ' : '\u2716 واقع - ') + j.detail, j.ok); })
+          .catch(function (er) { msg('خطأ: ' + er.message, false); });
+      }
+    });
+  }
+
+  function ensureSection(n) {
+    var sec = $('mx-section');
+    if (sec && n.form.contains(sec)) return sec;
+    if (sec && sec.parentNode) sec.parentNode.removeChild(sec);
+    sec = document.createElement('div');
+    sec.id = 'mx-section';
+    sec.innerHTML = sectionHtml();
+    var foot = n.save;
+    while (foot.parentElement && foot.parentElement !== n.form) foot = foot.parentElement;
+    n.form.insertBefore(sec, foot);
+    bind(sec);
+    toggleFields(sec);
+    resetState();
+    return sec;
+  }
+
+  var origFetch = window.fetch;
+  function loadServers(cb) {
+    if (S.servers.length && Date.now() - S.serversAt < 3000) return cb();
+    if (!origFetch) return cb();
+    origFetch.call(window, '/api/server-checks', { credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { S.servers = d || []; S.serversAt = Date.now(); cb(); })
+      .catch(function () { cb(); });
+  }
+
+  function tick() {
+    try {
+      var n = findNodes();
+      if (!n) return;
+      ensureSection(n);
+      var vis = visible(n.form);
+      if (vis && !S.wasVisible) resetState();   // النافذة اتفتحت من جديد
+      S.wasVisible = vis;
+      if (!vis || !n.ip || !n.name) return;
+      var ip = (n.ip.value || '').trim(), name = (n.name.value || '').trim(), key = ip + '|' + name;
+      if (key === S.lastKey) return;
+      S.lastKey = key;
+      if (!ip) return;
+      loadServers(function () {
+        var m = matchServer(S.servers, ip, name);
+        if (m && S.sid !== m.id) {            // تعديل سيرفر موجود: حمّل فحوصاته
+          S.sid = m.id; S.windows = !!m.windows_mode; S.wdirty = false; S.loaded = m.checks || []; S.removed = []; S.added = []; render();
+        } else if (!m && S.sid !== null) {    // رجعنا لإضافة سيرفر جديد
+          S.sid = null; S.windows = false; S.wdirty = false; S.loaded = []; S.removed = []; S.added = []; render();
+        }
+      });
+    } catch (e) { try { console.warn('[checks] ui:', e); } catch (e2) {} }
+  }
+  setInterval(tick, 600);
+
+  // ---------- بيضيف الفحوصات تلقائياً على طلب حفظ السيرفر (إضافة / تعديل) ----------
+  if (origFetch) window.fetch = function (input, init) {
+    try {
+      var url = (typeof input === 'string') ? input : ((input && input.url) || '');
+      var method = String((init && init.method) || (input && input.method) || 'GET').toUpperCase();
+      var m = /\/api\/servers(?:\/(\d+))?\/?(?:\?.*)?$/.exec(url);
+      if (m && (method === 'POST' || method === 'PUT') && init && typeof init.body === 'string' && modalVisible()) {
+        var body = JSON.parse(init.body);
+        adjustBody(method, m[1] ? parseInt(m[1], 10) : null, body);
+        var init2 = {}, k;
+        for (k in init) init2[k] = init[k];
+        init2.body = JSON.stringify(body);
+        var p = origFetch.call(this, input, init2);
+        p.then(function (r) { if (r && r.ok) setTimeout(resetState, 0); }, function () {});
+        return p;
+      }
+    } catch (e) { try { console.warn('[checks] fetch hook:', e); } catch (e2) {} }
+    return origFetch.apply(this, arguments);
+  };
+
+  window.__mx = { S: S, matchServer: matchServer, adjustBody: adjustBody };
+})();
+
+""" + "</script>"
