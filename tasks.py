@@ -63,7 +63,7 @@ def _check_dates(start: str, end: str) -> None:
         raise HTTPException(status_code=400, detail="تاريخ الانتهاء لازم يكون بعد تاريخ البداية")
 
 
-def register(app, get_db):
+def register(app, get_db, standalone=False):
     conn = get_db()
     conn.execute(
         """CREATE TABLE IF NOT EXISTS tasks (
@@ -124,11 +124,23 @@ def register(app, get_db):
 
     @app.get("/tasks", response_class=HTMLResponse)
     async def tasks_page():
-        return HTMLResponse(TASKS_HTML)
+        html = TASKS_HTML
+        if standalone:  # موقع تاسكات لوحده: شيل روابط لوحة المراقبة وصفحة الحالة
+            html = html.replace(
+                '<a href="/tasks/report">📊 تقرير الشركات</a> &nbsp;|&nbsp; <a href="/">لوحة المراقبة</a> &nbsp;|&nbsp; <a href="/status">صفحة الحالة</a>',
+                '<a href="/tasks/report">📊 تقرير الشركات</a>',
+            )
+        return HTMLResponse(html)
 
     @app.get("/tasks/report", response_class=HTMLResponse)
     async def tasks_report_page():
-        return HTMLResponse(REPORT_HTML)
+        html = REPORT_HTML
+        if standalone:
+            html = html.replace(
+                '<a href="/tasks">← التاسكات</a> &nbsp;|&nbsp; <a href="/">لوحة المراقبة</a>',
+                '<a href="/tasks">← التاسكات</a>',
+            )
+        return HTMLResponse(html)
 
     @app.get("/api/tasks/employees")
     def tasks_employees():
@@ -293,7 +305,7 @@ TASKS_HTML = """<!DOCTYPE html>
 <div class="wrap">
   <div class="top">
     <h1>📋 التاسكات</h1>
-    <div><a href="/billing">💰 الحسابات والفواتير</a> &nbsp;|&nbsp; <a href="/tasks/report">📊 تقرير الشركات</a> &nbsp;|&nbsp; <a href="/">لوحة المراقبة</a> &nbsp;|&nbsp; <a href="/status">صفحة الحالة</a></div>
+    <div><a href="/tasks/report">📊 تقرير الشركات</a> &nbsp;|&nbsp; <a href="/">لوحة المراقبة</a> &nbsp;|&nbsp; <a href="/status">صفحة الحالة</a></div>
   </div>
 
   <div class="stats">
@@ -340,7 +352,6 @@ TASKS_HTML = """<!DOCTYPE html>
   </div>
 
   <div id="list"></div>
-  <div style="text-align:center;color:var(--muted);font-size:12px;margin-top:24px">Developed by <strong>Eng. Samir Abo El-Khair</strong> — <span style="padding:2px 8px;border-radius:6px;background:rgba(22,163,74,.15);color:#16a34a;font-family:monospace;font-weight:700">Version 3.5</span></div>
 </div>
 
 <script>
@@ -542,7 +553,6 @@ REPORT_HTML = """<!DOCTYPE html>
 
   <div class="head-print"><h2 id="printTitle">تقرير التاسكات</h2><div id="printSub"></div></div>
   <div id="out"></div>
-  <div style="text-align:center;color:var(--muted);font-size:12px;margin-top:24px">Developed by <strong>Eng. Samir Abo El-Khair</strong> — <span style="padding:2px 8px;border-radius:6px;background:rgba(22,163,74,.15);color:#16a34a;font-family:monospace;font-weight:700">Version 3.5</span></div>
 </div>
 
 <script>

@@ -1,100 +1,141 @@
 <!DOCTYPE html>
-<html lang="ar" dir="rtl">
+<html lang="en" dir="ltr">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>__STATUS_TITLE__</title>
 <style>
   :root{
-    --bg:#f5f7fa; --card:#ffffff; --text:#1f2933; --muted:#6b7785; --border:#e3e8ee;
-    --green:#16a34a; --amber:#f59e0b; --red:#dc2626; --gray:#cbd5e1;
+    --bg:#f3f6f4; --card:#ffffff; --text:#1c2430; --muted:#6b7785; --line:#e8edf1;
+    --green:#3bd671; --green-text:#2fc063; --halo:#d6f7e2; --red:#e5484d; --amber:#f5a524; --gray:#dfe5ea;
+    --shadow:0 18px 50px rgba(20,40,30,.10);
   }
   @media (prefers-color-scheme: dark){
-    :root{ --bg:#0f141a; --card:#171e26; --text:#e6edf3; --muted:#8b98a5; --border:#26303b; --gray:#2c3742; }
+    :root{ --bg:#0e1411; --card:#161d19; --text:#e8efe9; --muted:#8a978f; --line:#243029; --halo:#1d3a28; --gray:#2a352f; --shadow:0 18px 50px rgba(0,0,0,.45); }
   }
   *{box-sizing:border-box}
-  body{margin:0;background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,"Segoe UI",Tahoma,sans-serif}
-  .wrap{max-width:900px;margin:0 auto;padding:24px 16px}
-  .top{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:16px}
-  h1{font-size:22px;margin:0}
-  .lang{display:flex;border:1px solid var(--border);border-radius:8px;overflow:hidden}
-  .lang button{border:0;background:var(--card);color:var(--text);padding:6px 14px;cursor:pointer;font-size:13px}
-  .lang button.on{background:var(--green);color:#fff}
-  .banner{padding:16px 18px;border-radius:10px;color:#fff;font-weight:600;margin-bottom:20px}
-  .banner.up{background:var(--green)} .banner.partial{background:var(--amber)} .banner.down{background:var(--red)}
-  .banner small{display:block;font-weight:400;opacity:.9;margin-top:4px}
-  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:16px;margin-bottom:12px}
-  .head{display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
-  .name{font-weight:600;font-size:16px}
-  .badge{font-size:13px;padding:2px 10px;border-radius:999px;color:#fff}
-  .badge.UP{background:var(--green)} .badge.DOWN{background:var(--red)} .badge.UNKNOWN{background:var(--gray);color:var(--text)}
-  .bars{display:flex;gap:2px;margin:12px 0 6px;direction:ltr;height:32px}
-  .bar{flex:1;border-radius:2px;background:var(--gray);min-width:2px}
-  .bar.g{background:var(--green)} .bar.a{background:var(--amber)} .bar.r{background:var(--red)}
-  .axis{display:flex;justify-content:space-between;font-size:12px;color:var(--muted);direction:ltr}
-  .stats{display:flex;gap:18px;flex-wrap:wrap;margin-top:10px;font-size:13px;color:var(--muted)}
-  .stats b{color:var(--text)}
-  .foot{text-align:center;color:var(--muted);font-size:12px;margin-top:20px}
+  html,body{margin:0}
+  body{background:var(--bg);color:var(--text);font-family:Roboto,system-ui,-apple-system,"Segoe UI",Tahoma,Arial,sans-serif;min-height:100vh}
+  .page{max-width:1240px;margin:0 auto;padding:36px 20px 28px}
+  .head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:22px;flex-wrap:wrap}
+  .head h1{margin:0;font-size:26px;font-weight:600}
+  .lang{display:inline-flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--card)}
+  .lang button{border:0;background:transparent;color:var(--text);padding:6px 14px;cursor:pointer;font:inherit;font-size:13px}
+  .lang button.on{background:var(--green);color:#06210f;font-weight:600}
+  .card{background:var(--card);border-radius:16px;box-shadow:var(--shadow);padding:10px 44px 14px}
+  .summary{display:flex;align-items:center;gap:12px;padding:22px 0 18px;border-bottom:1px solid var(--line);font-size:18px;font-weight:600}
+  .summary .dot{width:14px;height:14px;border-radius:50%;background:var(--green)}
+  .summary.partial .dot{background:var(--amber)} .summary.down .dot{background:var(--red)}
+  .summary small{font-weight:400;color:var(--muted);font-size:14px;margin-inline-start:auto}
+  .srv{padding:30px 0 28px;border-bottom:1px solid var(--line)}
+  .srv:last-child{border-bottom:0}
+  .top{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap}
+  .name{font-size:22px;font-weight:400;word-break:break-all}
+  .name .sep{color:var(--muted);margin:0 8px}
+  .name .pct{font-weight:500}
+  .pct.g{color:var(--green-text)} .pct.a{color:var(--amber)} .pct.r{color:var(--red)} .pct.n{color:var(--muted)}
+  .state{display:flex;align-items:center;gap:10px;font-size:22px;font-weight:400;white-space:nowrap}
+  .state .halo{width:32px;height:32px;border-radius:50%;background:var(--halo);display:flex;align-items:center;justify-content:center}
+  .state .halo i{width:18px;height:18px;border-radius:50%;background:var(--green);display:block}
+  .state.UP{color:var(--green-text)}
+  .state.DOWN{color:var(--red)} .state.DOWN .halo{background:rgba(229,72,77,.15)} .state.DOWN .halo i{background:var(--red)}
+  .state.UNKNOWN{color:var(--muted)} .state.UNKNOWN .halo{background:var(--gray)} .state.UNKNOWN .halo i{background:#9aa6b0}
+  .bars{display:flex;gap:4px;margin-top:22px;direction:ltr}
+  .bar{flex:1 1 0;min-width:3px;height:46px;border-radius:5px;background:var(--gray);cursor:default;transition:filter .1s}
+  .bar.g{background:var(--green)} .bar.r{background:var(--red)}
+  .bar:hover{filter:brightness(1.22)}
+  .empty{padding:50px 0;text-align:center;color:var(--muted)}
+  .foot{display:flex;justify-content:space-between;align-items:center;gap:14px;flex-wrap:wrap;margin-top:34px;color:var(--muted);font-size:15px}
+  .foot .l{display:flex;align-items:center;gap:22px;flex-wrap:wrap}
+  .foot button{border:0;background:transparent;color:var(--muted);font:inherit;cursor:pointer;display:inline-flex;align-items:center;gap:8px;padding:4px 0}
+  .foot button:hover{color:var(--text)}
+  .foot .credit{font-size:14px}
+  .foot .credit b{color:var(--text);font-weight:600}
+  .upd{text-align:center;color:var(--muted);font-size:12px;margin-top:14px}
+  #tip{position:fixed;z-index:50;pointer-events:none;display:none;background:#141a24;color:#fff;padding:9px 16px;border-radius:9px;text-align:center;transform:translate(-50%,-100%);white-space:nowrap;box-shadow:0 6px 18px rgba(0,0,0,.3)}
+  #tip small{display:block;color:#98a2b3;font-size:13px}
+  #tip b{font-size:20px;font-weight:500}
+  #tip:after{content:"";position:absolute;left:50%;bottom:-6px;margin-left:-6px;border:6px solid transparent;border-bottom:0;border-top-color:#141a24}
+  @media (max-width:700px){
+    .card{padding:6px 18px 10px}
+    .name,.state{font-size:18px} .bar{height:38px}
+  }
 </style>
 </head>
 <body>
-<div class="wrap">
-  <div class="top">
+<div class="page">
+  <div class="head">
     <h1>__STATUS_TITLE__</h1>
     <div class="lang">
-      <button id="btn-ar" onclick="setLang('ar')">العربية</button>
-      <button id="btn-en" onclick="setLang('en')">English</button>
+      <button type="button" id="btn-en" onclick="setLang('en')">EN</button>
+      <button type="button" id="btn-ar" onclick="setLang('ar')">AR</button>
     </div>
   </div>
-  <div id="banner" class="banner up">...</div>
-  <div id="list"></div>
-  <div class="foot" id="foot"></div>
-  <div class="foot" style="margin-top:8px">Developed by <strong>Eng. Samir Abo El-Khair</strong> — <span style="padding:2px 8px;border-radius:6px;background:rgba(22,163,74,.15);color:#16a34a;font-family:monospace;font-weight:700">Version 3.5</span></div>
+
+  <div class="card">
+    <div id="summary" class="summary up"><span class="dot"></span><span id="sumText">...</span><small id="sumCount"></small></div>
+    <div id="list"></div>
+  </div>
+
+  <div class="upd" id="upd"></div>
+
+  <div class="foot">
+    <div class="l">
+      <button type="button" id="fs"><span>&#9974;</span><span id="fsTxt"></span></button>
+      <button type="button" id="snd"><span>&#128276;</span><span id="sndTxt"></span></button>
+    </div>
+    <div class="credit"><span id="devTxt"></span> <b>Eng. Samir Abo El-Khair</b> &nbsp;|&nbsp; Version 4.0</div>
+  </div>
 </div>
+<div id="tip"></div>
 
 <script>
-const I18N = {
-  ar: {
-    up_all: 'كل السيرفرات تعمل بشكل طبيعي',
-    partial: 'بعض السيرفرات بها مشكلة',
-    down_all: 'كل السيرفرات متوقفة',
-    counts: (u, d, t) => u + ' يعمل — ' + d + ' متوقف — من أصل ' + t,
-    UP: 'يعمل', DOWN: 'متوقف', UNKNOWN: 'غير معروف',
-    d90: 'قبل 90 يوم', today: 'اليوم',
-    h24: '24 ساعة', d7: '7 أيام', d30: '30 يوم', d90s: '90 يوم',
-    nodata: 'لا توجد بيانات',
-    empty: 'لا توجد سيرفرات معروضة.',
-    updated: 'آخر تحديث: ',
-    err: 'تعذر تحميل البيانات، جاري إعادة المحاولة...'
-  },
+var I18N = {
   en: {
-    up_all: 'All systems operational',
-    partial: 'Some systems are having issues',
-    down_all: 'All systems are down',
-    counts: (u, d, t) => u + ' up — ' + d + ' down — ' + t + ' total',
+    up_all: 'All systems operational', partial: 'Some systems are having issues', down_all: 'All systems are down',
+    counts: function(u, d, t){ return u + ' up \u00b7 ' + d + ' down \u00b7 ' + t + ' total'; },
     UP: 'Operational', DOWN: 'Down', UNKNOWN: 'Unknown',
-    d90: '90 days ago', today: 'Today',
-    h24: '24 hours', d7: '7 days', d30: '30 days', d90s: '90 days',
-    nodata: 'No data',
-    empty: 'No servers to show.',
-    updated: 'Last updated: ',
-    err: 'Could not load data, retrying...'
+    nodata: 'No data', empty: 'No servers to show.', updated: 'Last updated: ',
+    err: 'Could not load data, retrying...', fs: 'Fullscreen mode', exitfs: 'Exit fullscreen',
+    sound: 'Alert sound', on: 'on', off: 'off', dev: 'Developed by'
+  },
+  ar: {
+    up_all: '\u0643\u0644 \u0627\u0644\u0633\u064a\u0631\u0641\u0631\u0627\u062a \u062a\u0639\u0645\u0644 \u0628\u0634\u0643\u0644 \u0637\u0628\u064a\u0639\u064a', partial: '\u0628\u0639\u0636 \u0627\u0644\u0633\u064a\u0631\u0641\u0631\u0627\u062a \u0628\u0647\u0627 \u0645\u0634\u0643\u0644\u0629', down_all: '\u0643\u0644 \u0627\u0644\u0633\u064a\u0631\u0641\u0631\u0627\u062a \u0645\u062a\u0648\u0642\u0641\u0629',
+    counts: function(u, d, t){ return u + ' \u064a\u0639\u0645\u0644 \u00b7 ' + d + ' \u0645\u062a\u0648\u0642\u0641 \u00b7 \u0645\u0646 ' + t; },
+    UP: '\u064a\u0639\u0645\u0644', DOWN: '\u0645\u062a\u0648\u0642\u0641', UNKNOWN: '\u063a\u064a\u0631 \u0645\u0639\u0631\u0648\u0641',
+    nodata: '\u0644\u0627 \u062a\u0648\u062c\u062f \u0628\u064a\u0627\u0646\u0627\u062a', empty: '\u0644\u0627 \u062a\u0648\u062c\u062f \u0633\u064a\u0631\u0641\u0631\u0627\u062a \u0645\u0639\u0631\u0648\u0636\u0629.', updated: '\u0622\u062e\u0631 \u062a\u062d\u062f\u064a\u062b: ',
+    err: '\u062a\u0639\u0630\u0631 \u062a\u062d\u0645\u064a\u0644 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a\u060c \u062c\u0627\u0631\u064a \u0625\u0639\u0627\u062f\u0629 \u0627\u0644\u0645\u062d\u0627\u0648\u0644\u0629...', fs: '\u0648\u0636\u0639 \u0627\u0644\u0634\u0627\u0634\u0629 \u0627\u0644\u0643\u0627\u0645\u0644\u0629', exitfs: '\u0625\u0646\u0647\u0627\u0621 \u0627\u0644\u0634\u0627\u0634\u0629 \u0627\u0644\u0643\u0627\u0645\u0644\u0629',
+    sound: '\u0635\u0648\u062a \u0627\u0644\u062a\u0646\u0628\u064a\u0647', on: '\u0634\u063a\u0627\u0644', off: '\u0645\u0642\u0641\u0648\u0644', dev: '\u0628\u0631\u0645\u062c\u0629 \u0627\u0644\u0645\u0647\u0646\u062f\u0633'
   }
 };
 
-let lang = 'ar';
+var lang = 'en';
 try {
-  const q = new URLSearchParams(location.search).get('lang');
-  lang = q || localStorage.getItem('status_lang') || ((navigator.language || '').toLowerCase().startsWith('ar') ? 'ar' : 'en');
+  var q = new URLSearchParams(location.search).get('lang');
+  lang = q || localStorage.getItem('status_lang') || ((navigator.language || '').toLowerCase().indexOf('ar') === 0 ? 'ar' : 'en');
 } catch (e) {}
-if (!I18N[lang]) lang = 'ar';
+if (!I18N[lang]) lang = 'en';
 
-const fmt = v => (v === null || v === undefined) ? '—' : v + '%';
-const cls = p => p === null ? '' : (p >= 99.9 ? 'g' : (p >= 95 ? 'a' : 'r'));
-function esc(s){ const d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+var soundOn = false;
+try { soundOn = localStorage.getItem('status_sound') === '1'; } catch (e) {}
+var audioCtx = null, lastData = null, prevStatus = null;
 
-let lastData = null;
+function $(id){ return document.getElementById(id); }
+function esc(s){ var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+function fmtPct(p){ return (p === null || p === undefined) ? '\u2014' : Number(p).toFixed(3) + '%'; }
+function pctClass(p){ if (p === null || p === undefined) return 'n'; return p >= 95 ? 'g' : (p >= 90 ? 'a' : 'r'); }
+function barClass(p){ if (p === null || p === undefined) return ''; return p >= 99.9 ? 'g' : 'r'; }
 
+function applyLang(){
+  var t = I18N[lang];
+  document.documentElement.lang = lang;
+  document.documentElement.dir = (lang === 'ar') ? 'rtl' : 'ltr';
+  $('btn-en').className = (lang === 'en') ? 'on' : '';
+  $('btn-ar').className = (lang === 'ar') ? 'on' : '';
+  $('devTxt').textContent = t.dev;
+  $('fsTxt').textContent = document.fullscreenElement ? t.exitfs : t.fs;
+  $('sndTxt').textContent = t.sound + ' ' + (soundOn ? t.on : t.off);
+}
 function setLang(l){
   lang = l;
   try { localStorage.setItem('status_lang', l); } catch (e) {}
@@ -102,49 +143,96 @@ function setLang(l){
   if (lastData) render(lastData);
 }
 
-function applyLang(){
-  document.documentElement.lang = lang;
-  document.documentElement.dir = lang === 'ar' ? 'rtl' : 'ltr';
-  document.getElementById('btn-ar').className = lang === 'ar' ? 'on' : '';
-  document.getElementById('btn-en').className = lang === 'en' ? 'on' : '';
+function barsFor(s){
+  var all = s.bars || [];
+  var w = $('list').clientWidth || 900;
+  var n = Math.max(30, Math.min(all.length, Math.floor(w / 12)));
+  return all.slice(all.length - n);
 }
 
 function render(d){
-  const t = I18N[lang];
-  const b = document.getElementById('banner');
-  b.className = 'banner ' + d.overall;
-  const msg = d.overall === 'up' ? t.up_all : (d.overall === 'partial' ? t.partial : t.down_all);
-  b.innerHTML = esc(msg) + '<small>' + esc(t.counts(d.up, d.down, d.total)) + '</small>';
+  var t = I18N[lang];
+  var sum = $('summary');
+  sum.className = 'summary ' + d.overall;
+  $('sumText').textContent = d.overall === 'up' ? t.up_all : (d.overall === 'partial' ? t.partial : t.down_all);
+  $('sumCount').textContent = t.counts(d.up, d.down, d.total);
 
-  document.getElementById('list').innerHTML = d.servers.map(s => {
-    const bars = s.bars.map(x =>
-      '<div class="bar ' + cls(x.pct) + '" title="' + esc(x.day) + ' — ' + (x.pct === null ? esc(t.nodata) : x.pct + '%') + '"></div>'
-    ).join('');
-    return '<div class="card">' +
-      '<div class="head"><span class="name">' + esc(s.name) + '</span>' +
-      '<span class="badge ' + esc(s.status) + '">' + esc(t[s.status] || t.UNKNOWN) + '</span></div>' +
-      '<div class="bars">' + bars + '</div>' +
-      '<div class="axis"><span>' + esc(t.d90) + '</span><span>' + esc(t.today) + '</span></div>' +
-      '<div class="stats">' +
-        '<span>' + esc(t.h24) + ': <b>' + fmt(s.uptime_24h) + '</b></span>' +
-        '<span>' + esc(t.d7) + ': <b>' + fmt(s.uptime_7d) + '</b></span>' +
-        '<span>' + esc(t.d30) + ': <b>' + fmt(s.uptime_30d) + '</b></span>' +
-        '<span>' + esc(t.d90s) + ': <b>' + fmt(s.uptime_90d) + '</b></span>' +
-      '</div></div>';
-  }).join('') || '<div class="card">' + esc(t.empty) + '</div>';
-
-  document.getElementById('foot').textContent = t.updated + d.generated;
-}
-
-async function load(){
-  try{
-    const res = await fetch('/api/public-status', {cache:'no-store'});
-    lastData = await res.json();
-    render(lastData);
-  }catch(e){
-    document.getElementById('foot').textContent = I18N[lang].err;
+  if (!d.servers.length) { $('list').innerHTML = '<div class="empty">' + esc(t.empty) + '</div>'; }
+  else {
+    $('list').innerHTML = d.servers.map(function(s){
+      var bars = barsFor(s).map(function(x){
+        return '<div class="bar ' + barClass(x.pct) + '" data-day="' + esc(x.day) + '" data-pct="' + (x.pct === null ? '' : x.pct) + '"></div>';
+      }).join('');
+      var st = (s.status === 'UP' || s.status === 'DOWN') ? s.status : 'UNKNOWN';
+      return '<div class="srv">' +
+        '<div class="top"><div class="name">' + esc(s.name) + '<span class="sep">|</span><span class="pct ' + pctClass(s.uptime_90d) + '">' + fmtPct(s.uptime_90d) + '</span></div>' +
+        '<div class="state ' + st + '"><span class="halo"><i></i></span><span>' + esc(t[st]) + '</span></div></div>' +
+        '<div class="bars">' + bars + '</div></div>';
+    }).join('');
   }
+  $('upd').textContent = t.updated + d.generated;
+  checkAlerts(d);
 }
+
+function beep(){
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    var o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.15;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.35);
+  } catch (e) {}
+}
+function checkAlerts(d){
+  var now = {}, i, wentDown = false;
+  for (i = 0; i < d.servers.length; i++) now[d.servers[i].name] = d.servers[i].status;
+  if (prevStatus) {
+    for (var k in now) { if (now[k] === 'DOWN' && prevStatus[k] && prevStatus[k] !== 'DOWN') wentDown = true; }
+  }
+  prevStatus = now;
+  if (wentDown && soundOn) beep();
+}
+
+function load(){
+  fetch('/api/public-status', {cache: 'no-store'}).then(function(r){ return r.json(); }).then(function(d){
+    lastData = d; render(d);
+  }).catch(function(){ $('upd').textContent = I18N[lang].err; });
+}
+
+// tooltip
+var tip = $('tip');
+$('list').addEventListener('mouseover', function(e){
+  var el = e.target;
+  if (!el.classList || !el.classList.contains('bar')) return;
+  var p = el.getAttribute('data-pct');
+  var r = el.getBoundingClientRect();
+  tip.innerHTML = '<small>' + esc(el.getAttribute('data-day')) + '</small><b>' + (p === '' ? esc(I18N[lang].nodata) : fmtPct(parseFloat(p))) + '</b>';
+  tip.style.left = (r.left + r.width / 2) + 'px';
+  tip.style.top = (r.top - 10) + 'px';
+  tip.style.display = 'block';
+});
+$('list').addEventListener('mouseout', function(e){
+  if (e.target.classList && e.target.classList.contains('bar')) tip.style.display = 'none';
+});
+
+// fullscreen + sound
+$('fs').onclick = function(){
+  if (document.fullscreenElement) document.exitFullscreen();
+  else if (document.documentElement.requestFullscreen) document.documentElement.requestFullscreen();
+};
+document.addEventListener('fullscreenchange', applyLang);
+$('snd').onclick = function(){
+  soundOn = !soundOn;
+  try { localStorage.setItem('status_sound', soundOn ? '1' : '0'); } catch (e) {}
+  if (soundOn) beep();   // بيفعّل الصوت في المتصفح ويجرّبه
+  applyLang();
+};
+
+var rz = null;
+window.addEventListener('resize', function(){
+  clearTimeout(rz);
+  rz = setTimeout(function(){ if (lastData) render(lastData); }, 150);
+});
 
 applyLang();
 load();

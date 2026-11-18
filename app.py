@@ -1,7 +1,6 @@
 import asyncio
 import json
 import os
-import shutil
 import sqlite3
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta
@@ -12,9 +11,15 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
-import billing
 import extras
-import tasks as tasks_page
+try:
+    import checks  # فحوصات Ping / Port / HTTP / Keyword + وضع ويندوز
+except ImportError:
+    checks = None
+try:
+    import tasks as tasks_page  # صفحة التاسكات
+except ImportError:
+    tasks_page = None
 from monitor_engine import (
     DEFAULT_SERVICE_PORTS,
     execute_service_action,
@@ -25,29 +30,10 @@ from monitor_engine import (
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "monitor.db")
-
-# مزامنة أي مجلد templates قديم مع الملفات الحديثة في المجلد الرئيسي لضمان ظهور التحديثات دائماً
-_LEGACY_TPL_DIR = os.path.join(BASE_DIR, "templates")
-if os.path.isdir(_LEGACY_TPL_DIR):
-    for _html_name in ("index.html", "server_detail.html", "status.html"):
-        _src = os.path.join(BASE_DIR, _html_name)
-        _dst = os.path.join(_LEGACY_TPL_DIR, _html_name)
-        if os.path.isfile(_src):
-            try:
-                shutil.copy2(_src, _dst)
-            except Exception:
-                pass
-
-# الأولوية دائماً للمجلد الرئيسي BASE_DIR قبل templates
 TEMPLATE_DIRS = [
-    d for d in [BASE_DIR, _LEGACY_TPL_DIR] if os.path.isdir(d)
+    d for d in [os.path.join(BASE_DIR, "templates"), BASE_DIR] if os.path.isdir(d)
 ]
 templates = Jinja2Templates(directory=TEMPLATE_DIRS)
-NO_CACHE_HEADERS = {
-    "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
-    "Pragma": "no-cache",
-    "Expires": "0",
-}
 
 
 def get_db() -> sqlite3.Connection:
@@ -224,6 +210,8 @@ async def check_and_update_single_server(
         server, run_rbl_check=run_rbl, previous_rbl=prev_rbl
     )
 
+    if checks:
+        inspection = await checks.augment(server, inspection)
     new_status = inspection["status"]
     new_services = inspection["services"]
     mail_stats = inspection["mail_stats"]
@@ -436,18 +424,19 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Linux Server & Mail Uptime Monitor — Developed by Eng. Samir Abo El-Khair",
-    version="3.5.0",
+    version="1.0.0",
     lifespan=lifespan,
 )
+
+if checks:
+    checks.register(app, get_db)
 
 # يسجّل: /status  و  /api/public-status  و  POST /api/reports/send-now
 extras_start = extras.register(app, get_db, get_settings_dict, BASE_DIR)
 
 # صفحة التاسكات المستقلة: /tasks
-tasks_page.register(app, get_db)
-
-# صفحة الحسابات اليومية والمستحقات والفواتير: /billing
-billing.register(app, get_db)
+if tasks_page:
+    tasks_page.register(app, get_db)
 
 
 # ─── Pydantic Payloads ───────────────────────────────────────────────────────
@@ -489,7 +478,7 @@ async def dashboard_page(request: Request):
     # زر عائم لإدارة السيرفرات الظاهرة في صفحة الاب تايم + روابط التاسكات
     idx = html.lower().rfind("</body>")
     html = (html[:idx] + extras.DASHBOARD_WIDGET + html[idx:]) if idx != -1 else html + extras.DASHBOARD_WIDGET
-    return HTMLResponse(html, headers=NO_CACHE_HEADERS)
+    return HTMLResponse(html)
 
 
 @app.get("/server/{server_id}", response_class=HTMLResponse)
@@ -503,7 +492,6 @@ async def server_detail_page(request: Request, server_id: int):
         request=request,
         name="server_detail.html",
         context={"server_id": server_id, "server_name": srv["name"], "server_ip": srv["ip"]},
-        headers=NO_CACHE_HEADERS,
     )
 
 
