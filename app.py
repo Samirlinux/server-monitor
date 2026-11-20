@@ -481,7 +481,7 @@ async def dashboard_page(request: Request):
     html = resp.body.decode("utf-8")
     # زر عائم لإدارة السيرفرات الظاهرة في صفحة الاب تايم + روابط التاسكات
     idx = html.lower().rfind("</body>")
-    extra_ui = extras.DASHBOARD_WIDGET + (checks.MODAL_SCRIPT if checks else "")
+    extra_ui = extras.DASHBOARD_WIDGET + extras.BELL_WIDGET + (checks.MODAL_SCRIPT if checks else "")
     html = (html[:idx] + extra_ui + html[idx:]) if idx != -1 else html + extra_ui
     return HTMLResponse(html)
 

@@ -180,6 +180,124 @@ ADMIN_PAGE = (
 )
 
 
+# جرس التنبيهات: بيتحقن في أعلى اللوحة (بيتنادى من app.py)
+BELL_WIDGET = "<script>" + r"""
+(function () {
+  if (window.__bellInit) return;
+  window.__bellInit = true;
+  var POS = 'top:10px;left:16px';   // مكان الجرس. لو بيغطي حاجة غيّره (مثلاً: top:10px;right:16px)
+  var S = { open: false, data: null, sound: false, prev: -1, ctx: null };
+  var baseTitle = document.title;
+  var seen = 0;
+  try { S.sound = localStorage.getItem('bell_sound') === '1'; } catch (e) {}
+  try { seen = parseInt(localStorage.getItem('bell_seen') || '0', 10) || 0; } catch (e) {}
+
+  function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
+
+  // ---------- نص كل مشكلة ----------
+  function ptext(p) {
+    if (p.kind === 'server') return { icon: '\uD83D\uDD34', title: 'السيرفر واقع: ' + p.server, detail: p.detail || '' };
+    if (p.kind === 'service') return { icon: '\uD83D\uDD34', title: 'خدمة واقعة: ' + p.name, detail: p.server + (p.detail ? ' \u2014 ' + p.detail : '') };
+    if (p.kind === 'disk') return { icon: '\uD83D\uDFE0', title: 'مساحة الهارد ' + p.value + '%', detail: p.server + (p.detail ? ' \u2014 ' + p.detail : '') };
+    if (p.kind === 'ram') return { icon: '\uD83D\uDFE0', title: 'استهلاك الرام ' + p.value + '%', detail: p.server + (p.detail ? ' \u2014 ' + p.detail : '') };
+    if (p.kind === 'tasks') return { icon: '\uD83D\uDFE0', title: p.value + ' مهام متأخرة', detail: 'افتح صفحة التاسكات', href: '/tasks' };
+    return { icon: '\u26A0\uFE0F', title: String(p.kind || ''), detail: p.server || '' };
+  }
+  var SEV = { CRITICAL: '#dc2626', WARNING: '#f59e0b', RECOVERY: '#16a34a' };
+
+  function buildHtml(d) {
+    var h = '<div style="padding:12px 14px;border-bottom:1px solid #e5e7eb;font-weight:700">التنبيهات <span style="font-weight:400;color:#6b7785;font-size:12px">(' + d.count + ' مشكلة حالياً)</span></div>';
+    if (!d.problems.length) {
+      h += '<div style="padding:16px 14px;color:#15803d">\u2714 كل حاجة تمام، مفيش مشاكل حالياً.</div>';
+    } else {
+      h += d.problems.map(function (p) {
+        var t = ptext(p);
+        var inner = '<div style="display:flex;gap:10px;padding:10px 14px;border-bottom:1px solid #f1f5f9"><span>' + t.icon + '</span><div style="flex:1;min-width:0"><div style="font-weight:600;font-size:14px;word-break:break-word">' + esc(t.title) + '</div><div style="font-size:12px;color:#6b7785;word-break:break-word">' + esc(t.detail) + '</div></div></div>';
+        return t.href ? '<a href="' + esc(t.href) + '" style="text-decoration:none;color:inherit;display:block">' + inner + '</a>' : inner;
+      }).join('');
+    }
+    h += '<div style="padding:7px 14px;background:#f3f4f6;font-size:12px;color:#6b7785">آخر الأحداث</div>';
+    if (!d.incidents.length) {
+      h += '<div style="padding:12px 14px;color:#6b7785;font-size:13px">لا توجد أحداث مسجلة.</div>';
+    } else {
+      h += d.incidents.map(function (i) {
+        var isNew = i.id > seen;
+        return '<div style="display:flex;gap:10px;padding:9px 14px;border-bottom:1px solid #f1f5f9"><span style="width:9px;height:9px;border-radius:50%;margin-top:5px;flex:none;background:' + (SEV[i.severity] || '#94a3b8') + '"></span>' +
+          '<div style="flex:1;min-width:0"><div style="font-size:13px;word-break:break-word">' + esc(i.title) + (isNew ? ' <span style="font-size:10px;background:#fee2e2;color:#b91c1c;border-radius:999px;padding:1px 7px">جديد</span>' : '') + '</div>' +
+          '<div style="font-size:11px;color:#6b7785;word-break:break-word">' + esc(i.server_name) + ' \u2014 ' + esc(i.created_at) + '</div></div></div>';
+      }).join('');
+    }
+    return h;
+  }
+
+  // ---------- الجرس ----------
+  var root = document.createElement('div');
+  root.id = 'bell-root';
+  root.style.cssText = 'position:fixed;' + POS + ';z-index:99998;font-family:inherit;direction:rtl;font-size:14px';
+  root.innerHTML =
+    '<style>#bell-btn{position:relative;width:42px;height:42px;border-radius:50%;border:1px solid #d1d5db;background:#fff;cursor:pointer;font-size:19px;line-height:1;box-shadow:0 2px 8px rgba(0,0,0,.15);padding:0}' +
+    '#bell-btn:hover{background:#f9fafb}' +
+    '#bell-badge{position:absolute;top:-7px;right:-7px;min-width:21px;height:21px;padding:0 5px;box-sizing:border-box;border-radius:999px;background:#e11d48;color:#fff;font-size:12px;font-weight:700;display:none;align-items:center;justify-content:center;box-shadow:0 0 0 4px rgba(34,197,94,.30)}' +
+    '#bell-panel{display:none;position:absolute;top:50px;left:0;width:370px;max-width:92vw;max-height:72vh;overflow:auto;background:#fff;color:#1f2933;border:1px solid #d1d5db;border-radius:12px;box-shadow:0 10px 30px rgba(0,0,0,.25)}</style>' +
+    '<button id="bell-btn" type="button" title="التنبيهات">\uD83D\uDD14<span id="bell-badge">0</span></button>' +
+    '<div id="bell-panel"><div id="bell-body"></div>' +
+    '<div style="display:flex;justify-content:space-between;align-items:center;padding:9px 14px;border-top:1px solid #e5e7eb;font-size:12px;color:#6b7785">' +
+    '<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="bell-snd" style="width:auto"> صوت عند ظهور مشكلة جديدة</label>' +
+    '<a href="#" id="bell-refresh" style="color:#2563eb;text-decoration:none">تحديث</a></div></div>';
+  document.body.appendChild(root);
+  var btn = document.getElementById('bell-btn'), badge = document.getElementById('bell-badge'), panel = document.getElementById('bell-panel'), body = document.getElementById('bell-body'), snd = document.getElementById('bell-snd');
+  snd.checked = S.sound;
+
+  function beep() {
+    try {
+      if (!S.ctx) S.ctx = new (window.AudioContext || window.webkitAudioContext)();
+      var o = S.ctx.createOscillator(), g = S.ctx.createGain();
+      o.type = 'sine'; o.frequency.value = 880; g.gain.value = 0.15;
+      o.connect(g); g.connect(S.ctx.destination); o.start(); o.stop(S.ctx.currentTime + 0.35);
+    } catch (e) {}
+  }
+  function maxIncident() { var m = 0; if (S.data) for (var i = 0; i < S.data.incidents.length; i++) if (S.data.incidents[i].id > m) m = S.data.incidents[i].id; return m; }
+  function update() {
+    var d = S.data; if (!d) return;
+    badge.textContent = d.count > 99 ? '99+' : String(d.count);
+    badge.style.display = d.count > 0 ? 'flex' : 'none';
+    document.title = (d.count > 0 ? '(' + d.count + ') ' : '') + baseTitle;
+    if (S.open) body.innerHTML = buildHtml(d);
+    if (S.prev >= 0 && d.count > S.prev && S.sound) beep();
+    S.prev = d.count;
+  }
+  function load() {
+    fetch('/api/notifications', { cache: 'no-store', credentials: 'same-origin' })
+      .then(function (r) { return r.json(); })
+      .then(function (d) { if (d && d.problems) { S.data = d; update(); } })
+      .catch(function () {});
+  }
+  btn.addEventListener('click', function (e) {
+    e.stopPropagation();
+    S.open = !S.open;
+    panel.style.display = S.open ? 'block' : 'none';
+    if (S.open && S.data) {
+      body.innerHTML = buildHtml(S.data);
+      seen = maxIncident();   // بعد ما اتعرضت: نعتبرها اتشافت
+      try { localStorage.setItem('bell_seen', String(seen)); } catch (e2) {}
+    }
+  });
+  panel.addEventListener('click', function (e) { e.stopPropagation(); });
+  document.addEventListener('click', function () { if (S.open) { S.open = false; panel.style.display = 'none'; } });
+  snd.addEventListener('change', function () {
+    S.sound = snd.checked;
+    try { localStorage.setItem('bell_sound', S.sound ? '1' : '0'); } catch (e) {}
+    if (S.sound) beep();   // بيفعّل الصوت في المتصفح ويجرّبه
+  });
+  document.getElementById('bell-refresh').addEventListener('click', function (e) { e.preventDefault(); load(); });
+  load();
+  setInterval(load, 15000);
+  window.__bell = { buildHtml: buildHtml, ptext: ptext, S: S };
+})();
+
+""" + "</script>"
+
+
 def register(app, get_db, get_settings_dict, base_dir):
     """يسجّل صفحة /status و API ويرجع دالة start() تنتج الـ background tasks."""
 
@@ -403,6 +521,60 @@ def register(app, get_db, get_settings_dict, base_dir):
         conn.commit()
         conn.close()
         return {"ok": True}
+
+    # ───────────────────────── جرس التنبيهات (اللي فوق في اللوحة) ─────────────────────────
+    @app.get("/api/notifications")
+    def notifications():
+        conn = get_db()
+        rows = conn.execute(
+            """SELECT s.id, s.name, s.ip, st.status, st.ssh_connected, st.ram_usage, st.ram_detail,
+                      st.disk_usage, st.disk_detail, st.services_json
+               FROM servers s LEFT JOIN server_state st ON s.id = st.server_id
+               ORDER BY s.name COLLATE NOCASE"""
+        ).fetchall()
+        inc = conn.execute(
+            "SELECT id, server_name, severity, service_name, title, details, created_at FROM incidents_logs ORDER BY id DESC LIMIT 15"
+        ).fetchall()
+        overdue = 0
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'tasks'").fetchone():
+            today = datetime.now().strftime("%Y-%m-%d")
+            overdue = conn.execute(
+                "SELECT COUNT(*) FROM tasks WHERE status != 'done' AND end_date != '' AND end_date < ?", (today,)
+            ).fetchone()[0]
+        conn.close()
+
+        prefs = parse_prefs(get_settings_dict())
+        problems = []
+        for r in rows:
+            status = r["status"] or "UNKNOWN"
+            if status == "DOWN":
+                problems.append({"level": "critical", "kind": "server", "server": r["name"], "detail": r["ip"]})
+                continue
+            if status != "UP":
+                continue
+            try:
+                svcs = json.loads(r["services_json"] or "[]")
+            except Exception:
+                svcs = []
+            for sv in svcs:
+                if sv.get("status") == "DOWN" and svc_visible(sv, prefs) and svc_alert_enabled(sv, prefs):
+                    problems.append({"level": "critical", "kind": "service", "server": r["name"],
+                                     "name": sv.get("name", sv.get("key", "")), "detail": sv.get("detail", "")})
+            if r["ssh_connected"]:
+                if (r["disk_usage"] or 0) >= DISK_ALERT_PCT:
+                    problems.append({"level": "warning", "kind": "disk", "server": r["name"],
+                                     "value": round(r["disk_usage"], 1), "detail": r["disk_detail"] or ""})
+                if (r["ram_usage"] or 0) >= RAM_ALERT_PCT:
+                    problems.append({"level": "warning", "kind": "ram", "server": r["name"],
+                                     "value": round(r["ram_usage"], 1), "detail": r["ram_detail"] or ""})
+        if overdue:
+            problems.append({"level": "warning", "kind": "tasks", "value": int(overdue)})
+        return {
+            "count": len(problems),
+            "problems": problems,
+            "incidents": [dict(i) for i in inc],
+            "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
 
     # ───────────────────────── تنبيهات الهارد والرام (فقط عند تجاوز الحد) ─────────────────────────
     _last_alert = {}
