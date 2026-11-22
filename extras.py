@@ -60,6 +60,39 @@ def svc_alert_enabled(svc, prefs):
     return any(k in text for k in DEFAULT_ALERT_KEYWORDS)
 
 
+# ───────────────────────── تتبّع الخدمات اللي اشتغلت قبل كده ─────────────────────────
+# بورت TCP (زي 5432 أو 465) ممكن يكون مقفول لأن السيرفر أصلاً ما بيقدّمش الخدمة دي، مش لأنها وقعت.
+# فبنعتبر البورت "مشكلة" في الجرس والشريط بس لو كان شغال قبل كده على نفس السيرفر.
+_SEEN = None
+
+
+def track_seen_up(get_db, server_id, services):
+    global _SEEN
+    try:
+        if _SEEN is None:
+            conn = get_db()
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS service_seen_up (server_id INTEGER NOT NULL, key TEXT NOT NULL, first_up TEXT, PRIMARY KEY (server_id, key))"
+            )
+            _SEEN = set((r[0], r[1]) for r in conn.execute("SELECT server_id, key FROM service_seen_up").fetchall())
+            conn.commit()
+            conn.close()
+        new = []
+        for s in services:
+            k = (server_id, str(s.get("key", "")))
+            if s.get("status") == "UP" and k not in _SEEN:
+                new.append(k)
+        if new:
+            now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+            conn = get_db()
+            conn.executemany("INSERT OR IGNORE INTO service_seen_up (server_id, key, first_up) VALUES (?, ?, ?)", [(a, b, now) for a, b in new])
+            conn.commit()
+            conn.close()
+            _SEEN.update(new)
+    except Exception as ex:
+        print(f"[track_seen_up] {ex}")
+
+
 # ───────────────────────── لوحة الإعدادات (ودجت داخل اللوحة + صفحة /status-settings) ─────────────────────────
 PANEL_INNER = r"""
 <div id="sx-body" style="font-size:14px;color:#1f2933">
@@ -292,6 +325,42 @@ BELL_WIDGET = "<script>" + r"""
       o.connect(g); g.connect(S.ctx.destination); o.start(); o.stop(S.ctx.currentTime + 0.35);
     } catch (e) {}
   }
+
+  // ---------- علامة التنبيه على أيقونة التاب (دايرة حمرا بالرقم زي Gmail) ----------
+  var favOrig = null, favMade = null, favLast = -1;
+  function favLink() { return document.querySelector('link[rel~="icon"]'); }
+  function drawFavicon(count) {
+    if (count === favLast) return;
+    favLast = count;
+    try {
+      var l = favLink();
+      if (favOrig === null) favOrig = l ? l.getAttribute('href') : '';
+      if (count <= 0) {                                   // مفيش مشاكل: رجّع أيقونة الموقع الأصلية
+        if (favMade && favMade.parentNode) {
+          if (favOrig) { favMade.setAttribute('href', favOrig); } else { favMade.parentNode.removeChild(favMade); favMade = null; }
+        }
+        return;
+      }
+      var c = document.createElement('canvas'); c.width = 64; c.height = 64;
+      var g = c.getContext('2d');
+      g.fillStyle = '#16a34a'; g.beginPath(); g.arc(30, 34, 26, 0, Math.PI * 2); g.fill();          // أيقونة أساسية خضرا
+      g.strokeStyle = '#fff'; g.lineWidth = 5; g.lineJoin = 'round'; g.lineCap = 'round';
+      g.beginPath(); g.moveTo(11, 36); g.lineTo(23, 36); g.lineTo(28, 24); g.lineTo(34, 46); g.lineTo(39, 36); g.lineTo(49, 36); g.stroke();   // شكل نبض
+      g.fillStyle = '#e11d48'; g.beginPath(); g.arc(46, 18, 18, 0, Math.PI * 2); g.fill();             // الدايرة الحمرا
+      g.strokeStyle = '#fff'; g.lineWidth = 3; g.beginPath(); g.arc(46, 18, 18, 0, Math.PI * 2); g.stroke();
+      g.fillStyle = '#fff'; g.font = 'bold ' + (count > 9 ? 20 : 26) + 'px Arial,sans-serif'; g.textAlign = 'center'; g.textBaseline = 'middle';
+      g.fillText(count > 99 ? '99+' : String(count), 46, 19);
+      var url = c.toDataURL('image/png');
+      if (!favMade) {
+        favMade = document.createElement('link');
+        favMade.setAttribute('rel', 'icon');
+        favMade.setAttribute('type', 'image/png');
+        if (l && l.parentNode) l.parentNode.removeChild(l);     // الأيقونة القديمة تتشال عشان المتصفح ياخد الجديدة
+        document.head.appendChild(favMade);
+      }
+      favMade.setAttribute('href', url);
+    } catch (e) {}
+  }
   function maxIncident() { var m = 0; if (S.data) for (var i = 0; i < S.data.incidents.length; i++) if (S.data.incidents[i].id > m) m = S.data.incidents[i].id; return m; }
   function update() {
     var d = S.data; if (!d) return;
@@ -299,6 +368,7 @@ BELL_WIDGET = "<script>" + r"""
     badge.style.display = d.count > 0 ? 'flex' : 'none';
     document.title = (d.count > 0 ? '(' + d.count + ') ' : '') + baseTitle;
     updateBanner(d);
+    drawFavicon(d.count);
     if (S.open) body.innerHTML = buildHtml(d);
     if (S.prev >= 0 && d.count > S.prev && S.sound) beep();
     S.prev = d.count;
@@ -337,7 +407,7 @@ BELL_WIDGET = "<script>" + r"""
   });
   load();
   setInterval(load, 15000);
-  window.__bell = { buildHtml: buildHtml, ptext: ptext, short: short, sig: sig, S: S };
+  window.__bell = { buildHtml: buildHtml, ptext: ptext, short: short, sig: sig, S: S, drawFavicon: drawFavicon };
 })();
 
 """ + "</script>"
@@ -360,6 +430,9 @@ def register(app, get_db, get_settings_dict, base_dir):
                    up INTEGER DEFAULT 0,
                    PRIMARY KEY (server_id, day)
                )"""
+        )
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS service_seen_up (server_id INTEGER NOT NULL, key TEXT NOT NULL, first_up TEXT, PRIMARY KEY (server_id, key))"
         )
         cols = [r[1] for r in conn.execute("PRAGMA table_info(servers)").fetchall()]
         if "public_visible" not in cols:
@@ -589,6 +662,15 @@ def register(app, get_db, get_settings_dict, base_dir):
             overdue = conn.execute(
                 "SELECT COUNT(*) FROM tasks WHERE status != 'done' AND end_date != '' AND end_date < ?", (today,)
             ).fetchone()[0]
+        try:
+            seen_keys = set((r[0], r[1]) for r in conn.execute("SELECT server_id, key FROM service_seen_up").fetchall())
+        except Exception:
+            seen_keys = set()
+        try:
+            seen_names = set((r[0], r[1]) for r in conn.execute(
+                "SELECT DISTINCT server_id, service_name FROM incidents_logs WHERE severity IN ('CRITICAL', 'RECOVERY')").fetchall())
+        except Exception:
+            seen_names = set()
         conn.close()
 
         prefs = parse_prefs(get_settings_dict())
@@ -606,6 +688,12 @@ def register(app, get_db, get_settings_dict, base_dir):
                 svcs = []
             for sv in svcs:
                 if sv.get("status") == "DOWN" and svc_visible(sv, prefs) and svc_alert_enabled(sv, prefs):
+                    skey = str(sv.get("key", ""))
+                    # خدمة systemd مثبتة وواقفة، أو فحص إضافي: مشكلة دايماً.
+                    # بورت TCP عادي: مشكلة بس لو كان شغال قبل كده (عشان السيرفر اللي ما بيقدّمش الخدمة دي أصلاً)
+                    if not skey.startswith("chk_") and sv.get("source") != "SSH / systemd":
+                        if (r["id"], skey) not in seen_keys and (r["id"], sv.get("name")) not in seen_names:
+                            continue
                     problems.append({"level": "critical", "kind": "service", "server": r["name"],
                                      "name": sv.get("name", sv.get("key", "")), "detail": sv.get("detail", "")})
             if r["ssh_connected"]:

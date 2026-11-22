@@ -28,6 +28,25 @@ from monitor_engine import (
     send_alerts,
 )
 
+import monitor_engine as _engine_module
+
+# إصلاح: الشرط الأصلي بتاع "هل الخدمة مثبتة؟" كان بيرجّع نجاح حتى للخدمة اللي مش موجودة
+# (systemctl list-unit-files بيطلع exit 0 دايماً)، فكل خدمة مش مثبتة كانت بتظهر "واقعة".
+# الشرط الجديد: بيفحص LoadState فعلياً.
+_OLD_COND = 'if systemctl list-unit-files "${svc}.service" >/dev/null 2>&1 || [ -f "/etc/init.d/${svc}" ] || pgrep -x "${svc}" >/dev/null 2>&1; then'
+_NEW_COND = 'if [ "$(systemctl show -p LoadState "${svc}.service" 2>/dev/null | cut -d= -f2)" = "loaded" ] || [ -f "/etc/init.d/${svc}" ] || pgrep -x "${svc}" >/dev/null 2>&1; then'
+try:
+    _script = getattr(_engine_module, "INSPECTION_BASH_SCRIPT", "")
+    if _OLD_COND in _script:
+        _engine_module.INSPECTION_BASH_SCRIPT = _script.replace(_OLD_COND, _NEW_COND)
+        print("[engine] fixed: only installed systemd services are checked")
+    elif _NEW_COND in _script:
+        print("[engine] service check already fixed")
+    else:
+        print("[engine] services check line not found - engine file is different, not patched")
+except Exception as _e:
+    print(f"[engine] patch failed: {_e!r}")
+
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.path.join(BASE_DIR, "monitor.db")
 TEMPLATE_DIRS = [
@@ -214,6 +233,7 @@ async def check_and_update_single_server(
         inspection = await checks.augment(server, inspection)
     new_status = inspection["status"]
     new_services = inspection["services"]
+    extras.track_seen_up(get_db, server_id, new_services)
     mail_stats = inspection["mail_stats"]
     rbl_status = inspection["rbl_status"]
     settings = get_settings_dict()
