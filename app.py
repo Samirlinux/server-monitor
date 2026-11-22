@@ -481,7 +481,7 @@ async def dashboard_page(request: Request):
     html = resp.body.decode("utf-8")
     # زر عائم لإدارة السيرفرات الظاهرة في صفحة الاب تايم + روابط التاسكات
     idx = html.lower().rfind("</body>")
-    extra_ui = extras.DASHBOARD_WIDGET + extras.BELL_WIDGET + (checks.MODAL_SCRIPT if checks else "")
+    extra_ui = extras.DASHBOARD_WIDGET + (checks.MODAL_SCRIPT if checks else "")
     html = (html[:idx] + extra_ui + html[idx:]) if idx != -1 else html + extra_ui
     return HTMLResponse(html)
 
@@ -937,6 +937,75 @@ async def api_test_alert():
         },
     )
     return {"ok": True, "results": res}
+
+
+def _hook_billing() -> None:
+    """
+    بيربط billing.py (الحسابات والفواتير) تلقائياً لو موجود جنب app.py، بدل ما نحتاج نعدّل app.py بإيدينا.
+    بيجرب الأشكال الشائعة: روتس بتتسجل وقت الاستيراد / دالة register(app, get_db) / router جاهز.
+    النتيجة بتتكتب في اللوج:  journalctl -u server-monitor | grep billing
+    """
+    import inspect
+
+    try:
+        before = len(app.routes)
+        import billing  # type: ignore
+    except ImportError:
+        return
+    except Exception as e:
+        print(f"[billing] import failed: {e!r}")
+        return
+
+    added = len(app.routes) - before
+    if added > 0:
+        print(f"[billing] hooked: {added} routes registered on import")
+        return
+
+    ctx = {
+        "app": app, "application": app, "fastapi_app": app,
+        "get_db": get_db, "db": get_db, "get_conn": get_db, "get_connection": get_db,
+        "db_path": DB_PATH, "database": DB_PATH, "db_file": DB_PATH,
+        "templates": templates, "base_dir": BASE_DIR,
+        "get_settings_dict": get_settings_dict, "get_settings": get_settings_dict,
+    }
+    names = ("register", "register_billing", "setup", "setup_billing", "init_app", "init_billing",
+             "install", "mount", "include_billing", "add_billing", "register_routes", "setup_routes")
+    for name in names:
+        fn = getattr(billing, name, None)
+        if not callable(fn):
+            continue
+        try:
+            kwargs, ok = {}, True
+            for pname, par in inspect.signature(fn).parameters.items():
+                if par.kind in (par.VAR_POSITIONAL, par.VAR_KEYWORD):
+                    continue
+                if pname in ctx:
+                    kwargs[pname] = ctx[pname]
+                elif par.default is par.empty:
+                    ok = False
+                    break
+            if not ok:
+                continue
+            res = fn(**kwargs)
+            if inspect.isawaitable(res):
+                asyncio.get_event_loop().create_task(res)
+            print(f"[billing] hooked via billing.{name}({', '.join(kwargs)}) -> +{len(app.routes) - before} routes")
+            return
+        except Exception as e:
+            print(f"[billing] billing.{name} failed: {e!r}")
+
+    for name in ("router", "api_router", "billing_router"):
+        r = getattr(billing, name, None)
+        if r is not None and hasattr(r, "routes"):
+            app.include_router(r)
+            print(f"[billing] hooked via include_router(billing.{name}) -> +{len(app.routes) - before} routes")
+            return
+
+    public = sorted(n for n, v in vars(billing).items() if callable(v) and not n.startswith("_") and getattr(v, "__module__", "") == "billing")
+    print(f"[billing] billing.py found but no known hook. callables: {public[:25]}")
+
+
+_hook_billing()
 
 
 if __name__ == "__main__":

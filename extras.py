@@ -186,7 +186,8 @@ BELL_WIDGET = "<script>" + r"""
   if (window.__bellInit) return;
   window.__bellInit = true;
   var POS = 'top:10px;left:16px';   // مكان الجرس. لو بيغطي حاجة غيّره (مثلاً: top:10px;right:16px)
-  var S = { open: false, data: null, sound: false, prev: -1, ctx: null };
+  var S = { open: false, data: null, sound: false, prev: -1, ctx: null, dismissed: '', basePad: '' };
+  try { S.basePad = document.body.style.paddingTop || ''; } catch (e) {}
   var baseTitle = document.title;
   var seen = 0;
   try { S.sound = localStorage.getItem('bell_sound') === '1'; } catch (e) {}
@@ -245,6 +246,41 @@ BELL_WIDGET = "<script>" + r"""
     '<label style="display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="bell-snd" style="width:auto"> صوت عند ظهور مشكلة جديدة</label>' +
     '<a href="#" id="bell-refresh" style="color:#2563eb;text-decoration:none">تحديث</a></div></div>';
   document.body.appendChild(root);
+
+  // ---------- شريط التنبيه الأحمر في أعلى الصفحة ----------
+  function short(p) {
+    if (p.kind === 'server') return 'السيرفر واقع: ' + p.server;
+    if (p.kind === 'service') return 'خدمة واقعة: ' + p.name + ' (' + p.server + ')';
+    if (p.kind === 'disk') return 'الهارد ' + p.value + '% \u2014 ' + p.server;
+    if (p.kind === 'ram') return 'الرام ' + p.value + '% \u2014 ' + p.server;
+    if (p.kind === 'tasks') return p.value + ' مهام متأخرة';
+    return String(p.kind || '');
+  }
+  function sig(d) { return d.problems.map(function (p) { return p.kind + '|' + (p.server || '') + '|' + (p.name || ''); }).join(';'); }
+  var banner = document.createElement('div');
+  banner.id = 'bell-banner';
+  banner.style.cssText = 'position:fixed;top:0;left:0;right:0;z-index:99997;display:none;align-items:center;gap:12px;padding:9px 16px;color:#fff;font-family:inherit;font-size:14px;font-weight:600;direction:rtl;box-shadow:0 2px 8px rgba(0,0,0,.25)';
+  banner.innerHTML = '<span id="bn-text" style="flex:1;min-width:0;word-break:break-word"></span>' +
+    '<a href="#" id="bn-more" style="color:#fff;text-decoration:underline;white-space:nowrap">التفاصيل</a>' +
+    '<button type="button" id="bn-x" title="إخفاء" style="background:transparent;border:0;color:#fff;font-size:20px;line-height:1;cursor:pointer;padding:0 4px">\u00D7</button>';
+  document.body.appendChild(banner);
+  function updateBanner(d) {
+    var show = d.count > 0 && S.dismissed !== sig(d);
+    if (!show) {
+      banner.style.display = 'none';
+      document.body.style.paddingTop = S.basePad;
+      root.style.top = '10px';
+      return;
+    }
+    var crit = d.problems.some(function (p) { return p.level === 'critical'; });
+    banner.style.background = crit ? '#dc2626' : '#d97706';
+    var items = d.problems.slice(0, 3).map(short).join('   \u2022   ');
+    document.getElementById('bn-text').textContent = '\u26A0 ' + d.count + ' مشكلة: ' + items + (d.count > 3 ? '   (+' + (d.count - 3) + ')' : '');
+    banner.style.display = 'flex';
+    var h = banner.offsetHeight || 42;
+    document.body.style.paddingTop = h + 'px';
+    root.style.top = (h + 10) + 'px';
+  }
   var btn = document.getElementById('bell-btn'), badge = document.getElementById('bell-badge'), panel = document.getElementById('bell-panel'), body = document.getElementById('bell-body'), snd = document.getElementById('bell-snd');
   snd.checked = S.sound;
 
@@ -262,6 +298,7 @@ BELL_WIDGET = "<script>" + r"""
     badge.textContent = d.count > 99 ? '99+' : String(d.count);
     badge.style.display = d.count > 0 ? 'flex' : 'none';
     document.title = (d.count > 0 ? '(' + d.count + ') ' : '') + baseTitle;
+    updateBanner(d);
     if (S.open) body.innerHTML = buildHtml(d);
     if (S.prev >= 0 && d.count > S.prev && S.sound) beep();
     S.prev = d.count;
@@ -290,12 +327,23 @@ BELL_WIDGET = "<script>" + r"""
     if (S.sound) beep();   // بيفعّل الصوت في المتصفح ويجرّبه
   });
   document.getElementById('bell-refresh').addEventListener('click', function (e) { e.preventDefault(); load(); });
+  document.getElementById('bn-more').addEventListener('click', function (e) {
+    e.preventDefault(); e.stopPropagation();
+    S.open = true; panel.style.display = 'block';
+    if (S.data) body.innerHTML = buildHtml(S.data);
+  });
+  document.getElementById('bn-x').addEventListener('click', function () {
+    if (S.data) { S.dismissed = sig(S.data); updateBanner(S.data); }
+  });
   load();
   setInterval(load, 15000);
-  window.__bell = { buildHtml: buildHtml, ptext: ptext, S: S };
+  window.__bell = { buildHtml: buildHtml, ptext: ptext, short: short, sig: sig, S: S };
 })();
 
 """ + "</script>"
+
+# الجرس والشريط بيتحقنوا مع الودجت نفسه (من غير ما app.py يتغير)
+DASHBOARD_WIDGET = DASHBOARD_WIDGET + BELL_WIDGET
 
 
 def register(app, get_db, get_settings_dict, base_dir):
